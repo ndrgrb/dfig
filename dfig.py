@@ -1713,6 +1713,9 @@ def run():
                 g.attach(sl, 0, i + 1, 1, 1)
 
                 vl = Gtk.Label(); vl.set_halign(Gtk.Align.END)
+                # Larghezza fissa + testo right-anchored: niente reflow quando
+                # il numero di cifre cambia (es. 9.99 → 10.0 → 12.3k).
+                vl.set_width_chars(7); vl.set_max_width_chars(7); vl.set_xalign(1.0)
                 vl.set_markup('<span font_family="monospace" foreground="#f1f5f9" font_weight="bold" size="small">—</span>')
                 g.attach(vl, 1, i + 1, 1, 1)
                 value_labels[key] = vl
@@ -1755,6 +1758,7 @@ def run():
             nl.set_markup(f'<span font_family="monospace" foreground="{color}" size="small">{name}</span>')
             mod_grid.attach(nl, 0, i, 1, 1)
             vl = Gtk.Label(); vl.set_halign(Gtk.Align.END)
+            vl.set_width_chars(7); vl.set_max_width_chars(7); vl.set_xalign(1.0)
             vl.set_markup('<span font_family="monospace" foreground="#f1f5f9" font_weight="bold" size="small">—</span>')
             mod_grid.attach(vl, 1, i, 1, 1)
             ul = Gtk.Label(); ul.set_halign(Gtk.Align.START)
