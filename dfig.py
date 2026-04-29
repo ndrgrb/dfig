@@ -106,55 +106,53 @@ CTRL_DEFAULT = np.array([MODE_OPEN, 0.0, 0.0, 500.0, 500.0, 100.0], dtype=np.flo
 # ============================================================
 
 @njit(cache=True, fastmath=True, nogil=True)
-def _rotor_voltage(s, Vs, ws, Vr, wr, params, ctrl, out_v):
-    """Calcola (v_rd, v_rq) nella terna sincrona in base al modo di controllo.
-       Open-loop: vettore rotante a wr (in terna rotore) di ampiezza Vr.
-       DPC: isteresi a 3 livelli memoryless su (P_s, Q_s) con vettori ±Vdc.
+def _compute_dpc(s, Vs, params, ctrl, out_v):
+    """Calcola (v_rd, v_rq) DPC dallo stato attuale.
+    Convenzione: V_sd=Vs, V_sq=0 → P_s=Vs·i_sd, Q_s=-Vs·i_sq.
+    Orientamento al flusso statorico (steady-state):
+        P_s ≈ -Vs·M/Ls · i_rd   →   per ↑P_s serve ↓i_rd  →  v_rd negativa
+        Q_s ≈ Vs²/(ωs Ls) + Vs·M/Ls · i_rq  →  per ↑Q_s serve ↑i_rq  →  v_rq positiva
     """
-    if ctrl[0] < 0.5:
-        # OPEN LOOP — vettore Vr rotante a wr in terna rotore
-        NP = params[5]
-        thm = s[5]; t = s[6]
-        a = wr * t - ws * t + NP * thm
-        out_v[0] = Vr * math.cos(a)
-        out_v[1] = Vr * math.sin(a)
-    else:
-        # DPC — isteresi diretta sulle potenze statoriche
-        # Convenzione segni: V_sd = Vs, V_sq = 0  →  P_s = Vs·i_sd,  Q_s = -Vs·i_sq
-        # In orientamento al flusso statorico (steady-state):
-        #   P_s ≈ -Vs·M/Ls · i_rd   →   per ↑P_s serve ↓i_rd  →  v_rd negativa
-        #   Q_s ≈ Vs²/(ωs Ls) + Vs·M/Ls · i_rq  →  per ↑Q_s serve ↑i_rq  →  v_rq positiva
-        Ls = params[2]; Lr = params[3]; M_ = params[4]
-        D = Ls * Lr - M_ * M_
-        psd = s[0]; psq = s[1]; prd = s[2]; prq = s[3]
-        isd = (Lr * psd - M_ * prd) / D
-        isq = (Lr * psq - M_ * prq) / D
-        Ps = Vs * isd
-        Qs = -Vs * isq
-        eP = ctrl[1] - Ps
-        eQ = ctrl[2] - Qs
-        hP = ctrl[3]; hQ = ctrl[4]; Vdc = ctrl[5]
-        if eP > hP:    sP = -1.0
-        elif eP < -hP: sP = +1.0
-        else:          sP = 0.0
-        if eQ > hQ:    sQ = +1.0
-        elif eQ < -hQ: sQ = -1.0
-        else:          sQ = 0.0
-        out_v[0] = Vdc * sP
-        out_v[1] = Vdc * sQ
+    Ls = params[2]; Lr = params[3]; M_ = params[4]
+    D = Ls * Lr - M_ * M_
+    psd = s[0]; psq = s[1]; prd = s[2]; prq = s[3]
+    isd = (Lr * psd - M_ * prd) / D
+    isq = (Lr * psq - M_ * prq) / D
+    Ps = Vs * isd
+    Qs = -Vs * isq
+    eP = ctrl[1] - Ps
+    eQ = ctrl[2] - Qs
+    hP = ctrl[3]; hQ = ctrl[4]; Vdc = ctrl[5]
+    if eP > hP:    sP = -1.0
+    elif eP < -hP: sP = +1.0
+    else:          sP = 0.0
+    if eQ > hQ:    sQ = +1.0
+    elif eQ < -hQ: sQ = -1.0
+    else:          sQ = 0.0
+    out_v[0] = Vdc * sP
+    out_v[1] = Vdc * sQ
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def deriv(s, Vs, ws, Vr, wr, Cl, params, ctrl, out):
+def deriv(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, out):
+    """RHS del sistema. In open-loop (use_held<0.5) il vettore di tensione
+    rotorica è ricalcolato continuamente da (Vr, wr, t, thm) dentro il passo
+    dell'integratore (vincolo di smoothness rispettato). In DPC (use_held>0.5)
+    si usano i valori (vrd_h, vrq_h) campionati dal chiamante prima dello step
+    e tenuti costanti per tutte le valutazioni intermedie del passo: in questo
+    modo il RHS è Lipschitziano dentro il passo, l'errore stimato resta
+    piccolo, dt non collassa."""
     Rs = params[0]; Rr = params[1]
     Ls = params[2]; Lr = params[3]; M_ = params[4]
     NP = params[5]; J = params[6]; B = params[7]
     D = Ls * Lr - M_ * M_
     psd = s[0]; psq = s[1]; prd = s[2]; prq = s[3]
-    wm = s[4]
-    v_buf = np.empty(2)
-    _rotor_voltage(s, Vs, ws, Vr, wr, params, ctrl, v_buf)
-    vrd = v_buf[0]; vrq = v_buf[1]
+    wm = s[4]; thm = s[5]; t = s[6]
+    if use_held > 0.5:
+        vrd = vrd_h; vrq = vrq_h
+    else:
+        a = wr * t - ws * t + NP * thm
+        vrd = Vr * math.cos(a); vrq = Vr * math.sin(a)
     isd = (Lr * psd - M_ * prd) / D
     isq = (Lr * psq - M_ * prq) / D
     ird = (Ls * prd - M_ * psd) / D
@@ -171,16 +169,18 @@ def deriv(s, Vs, ws, Vr, wr, Cl, params, ctrl, out):
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def observe(s, Vs, ws, Vr, wr, params, ctrl, out):
+def observe(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params, out):
     Rs = params[0]; Rr = params[1]
     Ls = params[2]; Lr = params[3]; M_ = params[4]
     NP = params[5]
     D = Ls * Lr - M_ * M_
     psd = s[0]; psq = s[1]; prd = s[2]; prq = s[3]
-    wm = s[4]; t = s[6]
-    v_buf = np.empty(2)
-    _rotor_voltage(s, Vs, ws, Vr, wr, params, ctrl, v_buf)
-    vrd = v_buf[0]; vrq = v_buf[1]
+    wm = s[4]; thm = s[5]; t = s[6]
+    if use_held > 0.5:
+        vrd = vrd_h; vrq = vrq_h
+    else:
+        a = wr * t - ws * t + NP * thm
+        vrd = Vr * math.cos(a); vrq = Vr * math.sin(a)
     isd = (Lr * psd - M_ * prd) / D
     isq = (Lr * psq - M_ * prq) / D
     ird = (Ls * prd - M_ * psd) / D
@@ -214,9 +214,10 @@ def observe(s, Vs, ws, Vr, wr, params, ctrl, out):
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def _maybe_sample(s, Vs, ws, Vr, wr, params, ctrl, last_log_t, samples, n_samples, max_samples, obs):
+def _maybe_sample(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params,
+                  last_log_t, samples, n_samples, max_samples, obs):
     if s[6] - last_log_t >= LOG_INTERVAL and n_samples < max_samples:
-        observe(s, Vs, ws, Vr, wr, params, ctrl, obs)
+        observe(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params, obs)
         for j in range(NH):
             samples[n_samples, j] = obs[j]
         n_samples += 1
@@ -232,15 +233,23 @@ def advance_euler(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl,
                   last_log_t, samples, max_samples):
     k = np.empty(7)
     obs = np.empty(NH)
+    v_buf = np.empty(2)
+    use_held = 1.0 if ctrl[0] > 0.5 else 0.0
     n_steps = 0
     n_samples = 0
     while s[6] < t_target and n_steps < MAX_STEPS_PER_ITER:
-        deriv(s, Vs, ws, Vr, wr, Cl, params, ctrl, k)
+        if use_held > 0.5:
+            _compute_dpc(s, Vs, params, ctrl, v_buf)
+            vrd_h = v_buf[0]; vrq_h = v_buf[1]
+        else:
+            vrd_h = 0.0; vrq_h = 0.0
+        deriv(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k)
         for i in range(7):
             s[i] += dt * k[i]
         n_steps += 1
-        n_samples, last_log_t = _maybe_sample(s, Vs, ws, Vr, wr, params, ctrl, last_log_t,
-                                               samples, n_samples, max_samples, obs)
+        n_samples, last_log_t = _maybe_sample(
+            s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params,
+            last_log_t, samples, n_samples, max_samples, obs)
     return n_steps, n_samples, last_log_t
 
 
@@ -248,23 +257,30 @@ def advance_euler(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl,
 def advance_rk4(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl,
                 last_log_t, samples, max_samples):
     k1 = np.empty(7); k2 = np.empty(7); k3 = np.empty(7); k4 = np.empty(7)
-    tmp = np.empty(7); obs = np.empty(NH)
+    tmp = np.empty(7); obs = np.empty(NH); v_buf = np.empty(2)
+    use_held = 1.0 if ctrl[0] > 0.5 else 0.0
     n_steps = 0
     n_samples = 0
     while s[6] < t_target and n_steps < MAX_STEPS_PER_ITER:
-        deriv(s, Vs, ws, Vr, wr, Cl, params, ctrl, k1)
+        if use_held > 0.5:
+            _compute_dpc(s, Vs, params, ctrl, v_buf)
+            vrd_h = v_buf[0]; vrq_h = v_buf[1]
+        else:
+            vrd_h = 0.0; vrq_h = 0.0
+        deriv(s,   Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k1)
         for i in range(7): tmp[i] = s[i] + 0.5 * dt * k1[i]
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k2)
+        deriv(tmp, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k2)
         for i in range(7): tmp[i] = s[i] + 0.5 * dt * k2[i]
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k3)
+        deriv(tmp, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k3)
         for i in range(7): tmp[i] = s[i] + dt * k3[i]
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k4)
+        deriv(tmp, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k4)
         h6 = dt / 6.0
         for i in range(7):
             s[i] += h6 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i])
         n_steps += 1
-        n_samples, last_log_t = _maybe_sample(s, Vs, ws, Vr, wr, params, ctrl, last_log_t,
-                                               samples, n_samples, max_samples, obs)
+        n_samples, last_log_t = _maybe_sample(
+            s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params,
+            last_log_t, samples, n_samples, max_samples, obs)
     return n_steps, n_samples, last_log_t
 
 
@@ -286,34 +302,48 @@ def advance_rk45(s, t_target, Vs, ws, Vr, wr, Cl,
     if dt > dt_max: dt = dt_max
     if dt < dt_min: dt = dt_min
 
+    v_buf = np.empty(2)
+    use_held = 1.0 if ctrl[0] > 0.5 else 0.0
+    vrd_h = 0.0; vrq_h = 0.0
+    # In DPC: il controllo viene campionato all'inizio di ogni step (zero-order
+    # hold); la stessa coppia (vrd_h, vrq_h) è usata per tutte le valutazioni
+    # intermedie del passo, così il RHS è continuo dentro lo step e dt non
+    # collassa per via dell'isteresi. Si ricampiona solo dopo step ACCETTATO.
+    sample_dpc = use_held > 0.5
+
     while s[6] < t_target and (n_steps + n_rej) < MAX_STEPS_PER_ITER:
         if s[6] + dt > t_target:
             dt = t_target - s[6]
         if dt <= 0.0:
             break
 
-        deriv(s, Vs, ws, Vr, wr, Cl, params, ctrl, k1)
+        if sample_dpc:
+            _compute_dpc(s, Vs, params, ctrl, v_buf)
+            vrd_h = v_buf[0]; vrq_h = v_buf[1]
+            sample_dpc = False  # già campionato per questo tentativo
+
+        deriv(s,   Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k1)
         for i in range(7): tmp[i] = s[i] + dt * (0.2 * k1[i])
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k2)
+        deriv(tmp, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k2)
         for i in range(7): tmp[i] = s[i] + dt * (3.0/40.0*k1[i] + 9.0/40.0*k2[i])
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k3)
+        deriv(tmp, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k3)
         for i in range(7): tmp[i] = s[i] + dt * (44.0/45.0*k1[i] - 56.0/15.0*k2[i] + 32.0/9.0*k3[i])
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k4)
+        deriv(tmp, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k4)
         for i in range(7):
             tmp[i] = s[i] + dt * (19372.0/6561.0*k1[i] - 25360.0/2187.0*k2[i]
                                   + 64448.0/6561.0*k3[i] - 212.0/729.0*k4[i])
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k5)
+        deriv(tmp, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k5)
         for i in range(7):
             tmp[i] = s[i] + dt * (9017.0/3168.0*k1[i] - 355.0/33.0*k2[i]
                                   + 46732.0/5247.0*k3[i] + 49.0/176.0*k4[i]
                                   - 5103.0/18656.0*k5[i])
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k6)
+        deriv(tmp, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k6)
         # 5th order solution
         for i in range(7):
             s5[i] = s[i] + dt * (35.0/384.0*k1[i] + 500.0/1113.0*k3[i]
                                  + 125.0/192.0*k4[i] - 2187.0/6784.0*k5[i]
                                  + 11.0/84.0*k6[i])
-        deriv(s5, Vs, ws, Vr, wr, Cl, params, ctrl, k7)
+        deriv(s5, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k7)
         # error = (b5 - b4) · dt · k
         e1 = 71.0/57600.0; e3 = -71.0/16695.0; e4 = 71.0/1920.0
         e5 = -17253.0/339200.0; e6 = 22.0/525.0; e7 = -1.0/40.0
@@ -343,8 +373,12 @@ def advance_rk45(s, t_target, Vs, ws, Vr, wr, Cl,
             dt *= factor
             if dt > dt_max: dt = dt_max
             if dt < dt_min: dt = dt_min
-            n_samples, last_log_t = _maybe_sample(s, Vs, ws, Vr, wr, params, ctrl, last_log_t,
-                                                   samples, n_samples, max_samples, obs)
+            n_samples, last_log_t = _maybe_sample(
+                s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params,
+                last_log_t, samples, n_samples, max_samples, obs)
+            # Step accettato → ricampiona controllo per il prossimo passo
+            if use_held > 0.5:
+                sample_dpc = True
         else:
             n_rej += 1
             factor = 0.9 * err_norm ** (-0.2)
@@ -353,6 +387,8 @@ def advance_rk45(s, t_target, Vs, ws, Vr, wr, Cl,
             if dt < dt_min:
                 # forziamo l'accettazione: il sistema è degenere a questo dt
                 dt = dt_min
+            # Step rigettato: tieni stessi (vrd_h, vrq_h) e riprova con dt più
+            # piccolo — non ricampionare, evita "rumore" nel ciclo di rifiuti.
 
     avg_dt = sum_dt / n_steps if n_steps > 0 else 0.0
     return n_steps, n_samples, last_log_t, n_rej, err_max, avg_dt, dt
