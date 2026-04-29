@@ -88,21 +88,73 @@ RESYNC_LAG = 0.200               # se sim resta indietro di > 200 ms, riaggancia
 
 INT_EULER, INT_RK4, INT_RK45 = 0, 1, 2
 
+# === Controllo (passato ai kernel JIT come array) ===
+# CTRL[0] = mode  (0 = open-loop V_r, 1 = DPC bang-bang)
+# CTRL[1] = Ps_ref [W]    riferimento di potenza attiva statorica (DPC)
+# CTRL[2] = Qs_ref [VAR]  riferimento di potenza reattiva statorica (DPC)
+# CTRL[3] = h_P    [W]    semibanda isteresi su P_s
+# CTRL[4] = h_Q    [VAR]  semibanda isteresi su Q_s
+# CTRL[5] = Vdc    [V]    ampiezza dei vettori di tensione rotorica (DPC)
+NCTRL = 6
+C_MODE, C_PSREF, C_QSREF, C_HP, C_HQ, C_VDC = 0, 1, 2, 3, 4, 5
+MODE_OPEN, MODE_DPC = 0.0, 1.0
+CTRL_DEFAULT = np.array([MODE_OPEN, 0.0, 0.0, 500.0, 500.0, 100.0], dtype=np.float64)
+
 
 # ============================================================
 # Numba kernels
 # ============================================================
 
 @njit(cache=True, fastmath=True, nogil=True)
-def deriv(s, Vs, ws, Vr, wr, Cl, params, out):
+def _rotor_voltage(s, Vs, ws, Vr, wr, params, ctrl, out_v):
+    """Calcola (v_rd, v_rq) nella terna sincrona in base al modo di controllo.
+       Open-loop: vettore rotante a wr (in terna rotore) di ampiezza Vr.
+       DPC: isteresi a 3 livelli memoryless su (P_s, Q_s) con vettori ±Vdc.
+    """
+    if ctrl[0] < 0.5:
+        # OPEN LOOP — vettore Vr rotante a wr in terna rotore
+        NP = params[5]
+        thm = s[5]; t = s[6]
+        a = wr * t - ws * t + NP * thm
+        out_v[0] = Vr * math.cos(a)
+        out_v[1] = Vr * math.sin(a)
+    else:
+        # DPC — isteresi diretta sulle potenze statoriche
+        # Convenzione segni: V_sd = Vs, V_sq = 0  →  P_s = Vs·i_sd,  Q_s = -Vs·i_sq
+        # In orientamento al flusso statorico (steady-state):
+        #   P_s ≈ -Vs·M/Ls · i_rd   →   per ↑P_s serve ↓i_rd  →  v_rd negativa
+        #   Q_s ≈ Vs²/(ωs Ls) + Vs·M/Ls · i_rq  →  per ↑Q_s serve ↑i_rq  →  v_rq positiva
+        Ls = params[2]; Lr = params[3]; M_ = params[4]
+        D = Ls * Lr - M_ * M_
+        psd = s[0]; psq = s[1]; prd = s[2]; prq = s[3]
+        isd = (Lr * psd - M_ * prd) / D
+        isq = (Lr * psq - M_ * prq) / D
+        Ps = Vs * isd
+        Qs = -Vs * isq
+        eP = ctrl[1] - Ps
+        eQ = ctrl[2] - Qs
+        hP = ctrl[3]; hQ = ctrl[4]; Vdc = ctrl[5]
+        if eP > hP:    sP = -1.0
+        elif eP < -hP: sP = +1.0
+        else:          sP = 0.0
+        if eQ > hQ:    sQ = +1.0
+        elif eQ < -hQ: sQ = -1.0
+        else:          sQ = 0.0
+        out_v[0] = Vdc * sP
+        out_v[1] = Vdc * sQ
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def deriv(s, Vs, ws, Vr, wr, Cl, params, ctrl, out):
     Rs = params[0]; Rr = params[1]
     Ls = params[2]; Lr = params[3]; M_ = params[4]
     NP = params[5]; J = params[6]; B = params[7]
     D = Ls * Lr - M_ * M_
     psd = s[0]; psq = s[1]; prd = s[2]; prq = s[3]
-    wm = s[4]; thm = s[5]; t = s[6]
-    a = wr * t - ws * t + NP * thm
-    vrd = Vr * math.cos(a); vrq = Vr * math.sin(a)
+    wm = s[4]
+    v_buf = np.empty(2)
+    _rotor_voltage(s, Vs, ws, Vr, wr, params, ctrl, v_buf)
+    vrd = v_buf[0]; vrq = v_buf[1]
     isd = (Lr * psd - M_ * prd) / D
     isq = (Lr * psq - M_ * prq) / D
     ird = (Ls * prd - M_ * psd) / D
@@ -119,15 +171,16 @@ def deriv(s, Vs, ws, Vr, wr, Cl, params, out):
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def observe(s, Vs, ws, Vr, wr, params, out):
+def observe(s, Vs, ws, Vr, wr, params, ctrl, out):
     Rs = params[0]; Rr = params[1]
     Ls = params[2]; Lr = params[3]; M_ = params[4]
     NP = params[5]
     D = Ls * Lr - M_ * M_
     psd = s[0]; psq = s[1]; prd = s[2]; prq = s[3]
-    wm = s[4]; thm = s[5]; t = s[6]
-    a = wr * t - ws * t + NP * thm
-    vrd = Vr * math.cos(a); vrq = Vr * math.sin(a)
+    wm = s[4]; t = s[6]
+    v_buf = np.empty(2)
+    _rotor_voltage(s, Vs, ws, Vr, wr, params, ctrl, v_buf)
+    vrd = v_buf[0]; vrq = v_buf[1]
     isd = (Lr * psd - M_ * prd) / D
     isq = (Lr * psq - M_ * prq) / D
     ird = (Ls * prd - M_ * psd) / D
@@ -161,9 +214,9 @@ def observe(s, Vs, ws, Vr, wr, params, out):
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def _maybe_sample(s, Vs, ws, Vr, wr, params, last_log_t, samples, n_samples, max_samples, obs):
+def _maybe_sample(s, Vs, ws, Vr, wr, params, ctrl, last_log_t, samples, n_samples, max_samples, obs):
     if s[6] - last_log_t >= LOG_INTERVAL and n_samples < max_samples:
-        observe(s, Vs, ws, Vr, wr, params, obs)
+        observe(s, Vs, ws, Vr, wr, params, ctrl, obs)
         for j in range(NH):
             samples[n_samples, j] = obs[j]
         n_samples += 1
@@ -175,42 +228,42 @@ def _maybe_sample(s, Vs, ws, Vr, wr, params, last_log_t, samples, n_samples, max
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def advance_euler(s, t_target, Vs, ws, Vr, wr, Cl, dt, params,
+def advance_euler(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl,
                   last_log_t, samples, max_samples):
     k = np.empty(7)
     obs = np.empty(NH)
     n_steps = 0
     n_samples = 0
     while s[6] < t_target and n_steps < MAX_STEPS_PER_ITER:
-        deriv(s, Vs, ws, Vr, wr, Cl, params, k)
+        deriv(s, Vs, ws, Vr, wr, Cl, params, ctrl, k)
         for i in range(7):
             s[i] += dt * k[i]
         n_steps += 1
-        n_samples, last_log_t = _maybe_sample(s, Vs, ws, Vr, wr, params, last_log_t,
+        n_samples, last_log_t = _maybe_sample(s, Vs, ws, Vr, wr, params, ctrl, last_log_t,
                                                samples, n_samples, max_samples, obs)
     return n_steps, n_samples, last_log_t
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def advance_rk4(s, t_target, Vs, ws, Vr, wr, Cl, dt, params,
+def advance_rk4(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl,
                 last_log_t, samples, max_samples):
     k1 = np.empty(7); k2 = np.empty(7); k3 = np.empty(7); k4 = np.empty(7)
     tmp = np.empty(7); obs = np.empty(NH)
     n_steps = 0
     n_samples = 0
     while s[6] < t_target and n_steps < MAX_STEPS_PER_ITER:
-        deriv(s, Vs, ws, Vr, wr, Cl, params, k1)
+        deriv(s, Vs, ws, Vr, wr, Cl, params, ctrl, k1)
         for i in range(7): tmp[i] = s[i] + 0.5 * dt * k1[i]
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, k2)
+        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k2)
         for i in range(7): tmp[i] = s[i] + 0.5 * dt * k2[i]
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, k3)
+        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k3)
         for i in range(7): tmp[i] = s[i] + dt * k3[i]
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, k4)
+        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k4)
         h6 = dt / 6.0
         for i in range(7):
             s[i] += h6 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i])
         n_steps += 1
-        n_samples, last_log_t = _maybe_sample(s, Vs, ws, Vr, wr, params, last_log_t,
+        n_samples, last_log_t = _maybe_sample(s, Vs, ws, Vr, wr, params, ctrl, last_log_t,
                                                samples, n_samples, max_samples, obs)
     return n_steps, n_samples, last_log_t
 
@@ -218,7 +271,7 @@ def advance_rk4(s, t_target, Vs, ws, Vr, wr, Cl, dt, params,
 # Dormand-Prince 5(4) coefficients
 @njit(cache=True, fastmath=True, nogil=True)
 def advance_rk45(s, t_target, Vs, ws, Vr, wr, Cl,
-                 dt_init, dt_min, dt_max, rtol, params,
+                 dt_init, dt_min, dt_max, rtol, params, ctrl,
                  last_log_t, samples, max_samples):
     k1 = np.empty(7); k2 = np.empty(7); k3 = np.empty(7); k4 = np.empty(7)
     k5 = np.empty(7); k6 = np.empty(7); k7 = np.empty(7)
@@ -239,28 +292,28 @@ def advance_rk45(s, t_target, Vs, ws, Vr, wr, Cl,
         if dt <= 0.0:
             break
 
-        deriv(s, Vs, ws, Vr, wr, Cl, params, k1)
+        deriv(s, Vs, ws, Vr, wr, Cl, params, ctrl, k1)
         for i in range(7): tmp[i] = s[i] + dt * (0.2 * k1[i])
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, k2)
+        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k2)
         for i in range(7): tmp[i] = s[i] + dt * (3.0/40.0*k1[i] + 9.0/40.0*k2[i])
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, k3)
+        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k3)
         for i in range(7): tmp[i] = s[i] + dt * (44.0/45.0*k1[i] - 56.0/15.0*k2[i] + 32.0/9.0*k3[i])
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, k4)
+        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k4)
         for i in range(7):
             tmp[i] = s[i] + dt * (19372.0/6561.0*k1[i] - 25360.0/2187.0*k2[i]
                                   + 64448.0/6561.0*k3[i] - 212.0/729.0*k4[i])
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, k5)
+        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k5)
         for i in range(7):
             tmp[i] = s[i] + dt * (9017.0/3168.0*k1[i] - 355.0/33.0*k2[i]
                                   + 46732.0/5247.0*k3[i] + 49.0/176.0*k4[i]
                                   - 5103.0/18656.0*k5[i])
-        deriv(tmp, Vs, ws, Vr, wr, Cl, params, k6)
+        deriv(tmp, Vs, ws, Vr, wr, Cl, params, ctrl, k6)
         # 5th order solution
         for i in range(7):
             s5[i] = s[i] + dt * (35.0/384.0*k1[i] + 500.0/1113.0*k3[i]
                                  + 125.0/192.0*k4[i] - 2187.0/6784.0*k5[i]
                                  + 11.0/84.0*k6[i])
-        deriv(s5, Vs, ws, Vr, wr, Cl, params, k7)
+        deriv(s5, Vs, ws, Vr, wr, Cl, params, ctrl, k7)
         # error = (b5 - b4) · dt · k
         e1 = 71.0/57600.0; e3 = -71.0/16695.0; e4 = 71.0/1920.0
         e5 = -17253.0/339200.0; e6 = 22.0/525.0; e7 = -1.0/40.0
@@ -290,7 +343,7 @@ def advance_rk45(s, t_target, Vs, ws, Vr, wr, Cl,
             dt *= factor
             if dt > dt_max: dt = dt_max
             if dt < dt_min: dt = dt_min
-            n_samples, last_log_t = _maybe_sample(s, Vs, ws, Vr, wr, params, last_log_t,
+            n_samples, last_log_t = _maybe_sample(s, Vs, ws, Vr, wr, params, ctrl, last_log_t,
                                                    samples, n_samples, max_samples, obs)
         else:
             n_rej += 1
@@ -311,10 +364,15 @@ def warmup_jit():
     s[1] = -2.2; s[3] = -2.2; s[4] = 100.0
     samples = np.empty((4, NH))
     p = PARAMS_DEFAULT.copy()
-    advance_euler(s.copy(), 1e-3, 690.0, 314.159, 0.0, 0.0, 0.0, 1e-4, p, 0.0, samples, 4)
-    advance_rk4(s.copy(),   1e-3, 690.0, 314.159, 0.0, 0.0, 0.0, 1e-4, p, 0.0, samples, 4)
+    c_ol = CTRL_DEFAULT.copy()
+    c_dpc = CTRL_DEFAULT.copy(); c_dpc[C_MODE] = MODE_DPC
+    advance_euler(s.copy(), 1e-3, 690.0, 314.159, 0.0, 0.0, 0.0, 1e-4, p, c_ol, 0.0, samples, 4)
+    advance_rk4(s.copy(),   1e-3, 690.0, 314.159, 0.0, 0.0, 0.0, 1e-4, p, c_ol, 0.0, samples, 4)
     advance_rk45(s.copy(),  1e-3, 690.0, 314.159, 0.0, 0.0, 0.0,
-                 1e-4, 1e-7, 1e-3, 1e-4, p, 0.0, samples, 4)
+                 1e-4, 1e-7, 1e-3, 1e-4, p, c_ol, 0.0, samples, 4)
+    # Compila anche il ramo DPC del kernel
+    advance_rk45(s.copy(),  1e-3, 690.0, 314.159, 0.0, 0.0, 0.0,
+                 1e-4, 1e-7, 1e-3, 1e-4, p, c_dpc, 0.0, samples, 4)
 
 
 # ============================================================
@@ -337,6 +395,14 @@ class SimEngine:
             "integrator": INT_RK45,
             "rt_lock": True,
             "speed_factor": 1.0,   # target = wall × speed
+            # === Controllo lato rotore ===
+            # mode: "open" (Vr/fr open-loop) o "dpc" (Direct Power Control)
+            "mode": "open",
+            "Ps_ref": 0.0,         # W
+            "Qs_ref": 0.0,         # VAR
+            "h_P": 500.0,          # W,  semibanda isteresi su P_s
+            "h_Q": 500.0,          # VAR, semibanda isteresi su Q_s
+            "Vdc_dpc": 100.0,      # V,  ampiezza vettori di tensione rotore in DPC
         }
         self.stats = {
             "compiled": False,
@@ -492,6 +558,12 @@ class SimEngine:
                 rt_lock = self.ctrl["rt_lock"]
                 rtol = self.ctrl["rtol"]
                 speed = self.ctrl.get("speed_factor", 1.0)
+                mode_str = self.ctrl.get("mode", "open")
+                Ps_ref = self.ctrl.get("Ps_ref", 0.0)
+                Qs_ref = self.ctrl.get("Qs_ref", 0.0)
+                h_P = self.ctrl.get("h_P", 500.0)
+                h_Q = self.ctrl.get("h_Q", 500.0)
+                Vdc_dpc = self.ctrl.get("Vdc_dpc", 100.0)
                 state_local = self.state.copy()
                 params_local = self.params.copy()
                 last_log_t = self._last_log_t
@@ -501,6 +573,10 @@ class SimEngine:
 
             ws = 2.0 * math.pi * fs
             wr = 2.0 * math.pi * fr
+            ctrl_arr = np.array([
+                MODE_DPC if mode_str == "dpc" else MODE_OPEN,
+                Ps_ref, Qs_ref, h_P, h_Q, Vdc_dpc,
+            ], dtype=np.float64)
 
             now = time.perf_counter()
             # target = t_sim_anchor + (now - t_wall_anchor) * speed
@@ -539,18 +615,18 @@ class SimEngine:
             n_rej = 0; err_max = 0.0; dt_avg = dt_max
             if integrator == INT_EULER:
                 n_steps, n_samples, last_log_t = advance_euler(
-                    state_local, t_target, Vs, ws, Vr, wr, Cl, dt_max, params_local,
+                    state_local, t_target, Vs, ws, Vr, wr, Cl, dt_max, params_local, ctrl_arr,
                     last_log_t, sample_buf, MAX_SAMPLES_PER_TICK)
             elif integrator == INT_RK4:
                 n_steps, n_samples, last_log_t = advance_rk4(
-                    state_local, t_target, Vs, ws, Vr, wr, Cl, dt_max, params_local,
+                    state_local, t_target, Vs, ws, Vr, wr, Cl, dt_max, params_local, ctrl_arr,
                     last_log_t, sample_buf, MAX_SAMPLES_PER_TICK)
             else:  # RK45
                 dt_min = max(1e-9, dt_max * 1e-4)
                 (n_steps, n_samples, last_log_t,
                  n_rej, err_max, dt_avg, dt_rk45) = advance_rk45(
                     state_local, t_target, Vs, ws, Vr, wr, Cl,
-                    dt_rk45, dt_min, dt_max, rtol, params_local,
+                    dt_rk45, dt_min, dt_max, rtol, params_local, ctrl_arr,
                     last_log_t, sample_buf, MAX_SAMPLES_PER_TICK)
 
             t1 = time.perf_counter()
@@ -1165,11 +1241,51 @@ def run():
 
         fslip_lbl = Gtk.Label(); fslip_lbl.set_halign(Gtk.Align.START)
         fslip_lbl.set_markup('<span font_family="monospace" foreground="#78716c" size="small">f_slip = 0.0 Hz</span>')
-        cbox.append(panel("ROTORE", "#ef4444", [
-            make_slider("|V_r|", 0, 0, 200, 0.5, lambda v: engine.set_ctrl(Vr=v)),
-            make_slider("f_r [Hz]", 0, -50, 50, 0.5, lambda v: engine.set_ctrl(fr=v)),
-            fslip_lbl,
-        ]))
+
+        # Toggle modo: open-loop (Vr/fr imposti) ↔ DPC (riferimenti P_s*, Q_s*)
+        mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        mode_lbl = Gtk.Label()
+        mode_lbl.set_markup('<span font_family="monospace" foreground="#94a3b8" size="small">modo</span>')
+        mode_lbl.set_halign(Gtk.Align.START); mode_lbl.set_hexpand(True)
+        rb_open = Gtk.ToggleButton(label="open-loop")
+        rb_dpc  = Gtk.ToggleButton(label="DPC")
+        rb_dpc.set_group(rb_open)
+        rb_open.set_active(True)
+        mode_box.append(mode_lbl); mode_box.append(rb_open); mode_box.append(rb_dpc)
+
+        # Sliders open-loop
+        ol_vr = make_slider("|V_r|", 0, 0, 200, 0.5, lambda v: engine.set_ctrl(Vr=v))
+        ol_fr = make_slider("f_r [Hz]", 0, -50, 50, 0.5, lambda v: engine.set_ctrl(fr=v))
+        ol_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        ol_box.append(ol_vr); ol_box.append(ol_fr); ol_box.append(fslip_lbl)
+
+        # Sliders DPC (P_s*/Q_s* in kW/kVAR — internamente convertiti in W/VAR)
+        dpc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        dpc_psref = make_slider("P_s* [kW]",  0,  -1000, 1000, 5,
+                                lambda v: engine.set_ctrl(Ps_ref=v * 1e3))
+        dpc_qsref = make_slider("Q_s* [kVAR]", 0, -1000, 1000, 5,
+                                lambda v: engine.set_ctrl(Qs_ref=v * 1e3))
+        dpc_vdc   = make_slider("V_dc rotore [V]", 100, 10, 500, 5,
+                                lambda v: engine.set_ctrl(Vdc_dpc=v))
+        dpc_hp    = make_slider("banda h_P [kW]", 0.5, 0.05, 20, 0.05,
+                                lambda v: engine.set_ctrl(h_P=v * 1e3))
+        dpc_hq    = make_slider("banda h_Q [kVAR]", 0.5, 0.05, 20, 0.05,
+                                lambda v: engine.set_ctrl(h_Q=v * 1e3))
+        dpc_box.append(dpc_psref); dpc_box.append(dpc_qsref)
+        dpc_box.append(dpc_vdc);   dpc_box.append(dpc_hp); dpc_box.append(dpc_hq)
+        dpc_box.set_visible(False)
+
+        def on_mode_toggled(_btn):
+            if rb_dpc.get_active():
+                engine.set_ctrl(mode="dpc")
+                ol_box.set_visible(False); dpc_box.set_visible(True)
+            else:
+                engine.set_ctrl(mode="open")
+                ol_box.set_visible(True);  dpc_box.set_visible(False)
+        rb_open.connect("toggled", on_mode_toggled)
+        rb_dpc.connect("toggled", on_mode_toggled)
+
+        cbox.append(panel("ROTORE", "#ef4444", [mode_box, ol_box, dpc_box]))
 
         cbox.append(panel("CARICO", "#22c55e", [
             make_slider("C_load [Nm]", 0, -15000, 15000, 100, lambda v: engine.set_ctrl(Cl=v)),
@@ -1567,8 +1683,18 @@ def run():
             Ce = NP_p * M_p * (isq*ird - isd*irq)
             Ps = ctrl["Vs"] * isd
             Qs = -ctrl["Vs"] * isq
-            a = 2*math.pi*ctrl["fr"]*t_now - ws_now*t_now + NP_p*st[5]
-            vrd = ctrl["Vr"]*math.cos(a); vrq = ctrl["Vr"]*math.sin(a)
+            if ctrl.get("mode", "open") == "dpc":
+                # Stessa logica del kernel: isteresi 3-livelli su (Ps, Qs)
+                hP = ctrl.get("h_P", 500.0); hQ = ctrl.get("h_Q", 500.0)
+                Vdc = ctrl.get("Vdc_dpc", 100.0)
+                eP = ctrl.get("Ps_ref", 0.0) - Ps
+                eQ = ctrl.get("Qs_ref", 0.0) - Qs
+                sP = -1.0 if eP > hP else (+1.0 if eP < -hP else 0.0)
+                sQ = +1.0 if eQ > hQ else (-1.0 if eQ < -hQ else 0.0)
+                vrd = Vdc * sP; vrq = Vdc * sQ
+            else:
+                a = 2*math.pi*ctrl["fr"]*t_now - ws_now*t_now + NP_p*st[5]
+                vrd = ctrl["Vr"]*math.cos(a); vrq = ctrl["Vr"]*math.sin(a)
             Pr = vrd*ird + vrq*irq
             Qr = vrq*ird - vrd*irq
             PRs = Rs_p*(isd*isd + isq*isq)
