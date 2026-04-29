@@ -57,7 +57,7 @@ HIST_FIELDS = ["t", "wm", "Ce", "Ps", "Qs", "Pr", "slip",
 
 # Catalogo segnali plottabili (chiave hist · nome leggibile · unità · RGB)
 SIGNALS_LIST = [
-    ("wm",   "ω_m",  "RPM",   0.23, 0.51, 0.96),
+    ("wm",   "ω_m",  "giri/s", 0.23, 0.51, 0.96),
     ("Ce",   "C_em", "kNm",   0.94, 0.27, 0.27),
     ("Ps",   "P_s",  "kW",    0.23, 0.51, 0.96),
     ("Qs",   "Q_s",  "kVAR",  0.55, 0.36, 0.96),
@@ -141,7 +141,7 @@ def observe(s, Vs, ws, Vr, wr, params, out):
     PRr = Rr * (ird * ird + irq * irq)
     slip = (ws - NP * wm) / ws * 100.0 if ws > 0 else 0.0
     out[0] = t
-    out[1] = wm * 60.0 / (2.0 * math.pi)
+    out[1] = wm / (2.0 * math.pi)
     out[2] = Ce / 1e3
     out[3] = Ps / 1e3
     out[4] = Qs / 1e3
@@ -918,9 +918,14 @@ def draw_tplot(area, cr, w, h, snap, signal_keys, t_win, title,
         cr.move_to(lx, 14); cr.line_to(lx + 14, 14); cr.stroke()
 
     # === Cursore + tooltip cross-plot ===
-    ct = cursor_state.get("t")
-    if ct is not None and ts <= ct <= tn:
-        x_cur = xof(ct)
+    # Il cursore è ancorato alla x dello schermo (sotto il puntatore del
+    # mouse). Il tempo si ricava dalla x usando lo snap corrente: così,
+    # mentre i dati scorrono, il cursore resta esattamente sotto al mouse
+    # senza derivare né scattare.
+    cx = cursor_state.get("x")
+    if cx is not None and M_L <= cx <= M_L + plot_w:
+        x_cur = cx
+        ct = ts + (cx - M_L) / plot_w * t_win
         cr.set_source_rgba(0.92, 0.92, 0.95, 0.5)
         cr.set_line_width(1); cr.set_dash([3, 2])
         cr.move_to(x_cur, M_T); cr.line_to(x_cur, M_T + plot_h); cr.stroke()
@@ -1315,7 +1320,7 @@ def run():
         ]
         plot_titles = [f"Plot {j+1}" for j in range(plot_count)]
         y_persist = {}
-        cursor_state = {"t": None}
+        cursor_state = {"x": None}
         plot_drawing_areas = []
 
         # Suddivisione del catalogo in due gruppi
@@ -1458,17 +1463,13 @@ def run():
 
         def make_motion_handler(da):
             def on_motion(_ctrl, x, _y):
-                snap = render_state["snap"]
-                if snap is None or len(snap.t) < 2: return
-                ww = da.get_width() or 1
-                tn = snap.t[-1]; ts = tn - twin[0]
-                cursor_state["t"] = ts + (x / ww) * twin[0]
+                cursor_state["x"] = float(x)
                 for d in plot_drawing_areas:
                     d.queue_draw()
             return on_motion
 
         def on_leave(_ctrl):
-            cursor_state["t"] = None
+            cursor_state["x"] = None
             for d in plot_drawing_areas:
                 d.queue_draw()
 
@@ -1490,7 +1491,7 @@ def run():
         # Reset Y persistente quando si fa RESET globale
         def on_reset_y(*_):
             y_persist.clear()
-            cursor_state["t"] = None
+            cursor_state["x"] = None
             for d in plot_drawing_areas:
                 d.queue_draw()
         rst_btn.connect("clicked", on_reset_y)
@@ -1576,7 +1577,7 @@ def run():
 
             # Valori per ogni segnale del catalogo (chiave hist → valore istantaneo)
             sig_values = {
-                "wm":   wm_now * 60 / (2*math.pi),
+                "wm":   wm_now / (2*math.pi),
                 "Ce":   Ce / 1e3,
                 "Ps":   Ps / 1e3,
                 "Qs":   Qs / 1e3,
