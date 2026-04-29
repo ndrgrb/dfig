@@ -1314,9 +1314,9 @@ def run():
         plot_count = 4
         plot_signals = [
             ["wm"],
-            ["Ce"],
-            ["Ps", "Qs", "Pr"],
-            ["slip"],
+            [],
+            [],
+            [],
         ]
         plot_titles = [f"Plot {j+1}" for j in range(plot_count)]
         y_persist = {}
