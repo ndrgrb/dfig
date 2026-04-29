@@ -5,6 +5,21 @@
 
 ---
 
+## Installazione (Ubuntu 26.04)
+
+Il simulatore richiede Python 3 con GTK 4, Cairo, NumPy e Numba. Su Ubuntu 26.04 tutto è
+disponibile via `apt`:
+
+```bash
+sudo apt update && sudo apt install -y \
+    python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 \
+    python3-cairo python3-numpy python3-numba
+```
+
+Poi si lancia con `python3 dfig.py`.
+
+---
+
 ## Indice
 
 1. [Cos'è una DFIG e perché ci interessa](#1-cosè-una-dfig-e-perché-ci-interessa)
