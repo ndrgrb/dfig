@@ -1301,9 +1301,11 @@ def run():
             gbox.append(row)
             diag_labels[key] = (vl, unit)
 
+        # gbox (DIAGNOSTICA NUMERICA) costruito ma NASCOSTO per ora
+        gbox.set_visible(False)
         dq_row.append(gbox)
 
-        # === Composer TRACCE === (sempre visibile, accanto ai gauge/diagnostica)
+        # === Composer SEGNALI === (due colonne: scalari | dq) + moduli a fianco
         plot_count = 4
         plot_signals = [
             ["wm"],
@@ -1316,33 +1318,21 @@ def run():
         cursor_state = {"t": None}
         plot_drawing_areas = []
 
+        # Suddivisione del catalogo in due gruppi
+        SCALAR_KEYS = ["wm", "Ce", "Ps", "Qs", "Pr", "Qr", "PRs", "PRr", "slip"]
+        DQ_KEYS     = ["isd", "isq", "ird", "irq", "psd", "psq", "prd", "prq"]
+
         comp_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         comp_box.set_margin_start(8)
         comp_title = Gtk.Label(); comp_title.set_halign(Gtk.Align.START)
         comp_title.set_markup('<span font_family="monospace" font_weight="bold" foreground="#64748b" size="small">SEGNALI · valore istantaneo · plot</span>')
         comp_box.append(comp_title)
 
-        comp_grid = Gtk.Grid()
-        comp_grid.set_column_spacing(10)
-        comp_grid.set_row_spacing(1)
-
-        # Header: segnale | valore | unità | P1..P4
-        def hdr(text):
-            l = Gtk.Label()
-            l.set_markup(f'<span font_family="monospace" foreground="#475569" size="x-small">{text}</span>')
-            l.set_halign(Gtk.Align.START)
-            return l
-
-        comp_grid.attach(hdr("segnale"), 0, 0, 1, 1)
-        val_hdr = hdr("valore"); val_hdr.set_halign(Gtk.Align.END)
-        comp_grid.attach(val_hdr, 1, 0, 1, 1)
-        comp_grid.attach(hdr("u.m."), 2, 0, 1, 1)
-        for j in range(plot_count):
-            ph = hdr(f"P{j+1}"); ph.set_halign(Gtk.Align.CENTER)
-            comp_grid.attach(ph, j + 3, 0, 1, 1)
+        # HBox a 3 colonne: [grid scalari] [grid dq] [moduli derivati]
+        comp_inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
 
         comp_checks = {}
-        value_labels = {}  # key → Gtk.Label da aggiornare con il valore istantaneo
+        value_labels = {}
 
         def update_plot_titles():
             for j in range(plot_count):
@@ -1361,47 +1351,56 @@ def run():
             for d in plot_drawing_areas:
                 d.queue_draw()
 
-        for i, (key, name, unit, r, g, b) in enumerate(SIGNALS_LIST):
-            color_hex = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
-            sl = Gtk.Label()
-            sl.set_markup(
-                f'<span font_family="monospace" foreground="{color_hex}" size="small">'
-                f'● {name}</span>')
-            sl.set_halign(Gtk.Align.START); sl.set_use_markup(True)
-            comp_grid.attach(sl, 0, i + 1, 1, 1)
+        def hdr(text, halign=Gtk.Align.START):
+            l = Gtk.Label()
+            l.set_markup(f'<span font_family="monospace" foreground="#475569" size="x-small">{text}</span>')
+            l.set_halign(halign)
+            return l
 
-            # Cella valore — popolata da gui_tick
-            vl = Gtk.Label()
-            vl.set_halign(Gtk.Align.END)
-            vl.set_markup('<span font_family="monospace" foreground="#f1f5f9" font_weight="bold" size="small">—</span>')
-            comp_grid.attach(vl, 1, i + 1, 1, 1)
-            value_labels[key] = vl
-
-            # Cella unità
-            ul = Gtk.Label(); ul.set_halign(Gtk.Align.START)
-            ul.set_markup(f'<span font_family="monospace" foreground="#475569" size="x-small">{unit}</span>')
-            comp_grid.attach(ul, 2, i + 1, 1, 1)
-
-            # Checkbox plot
+        def build_signal_grid(keys):
+            g = Gtk.Grid()
+            g.set_column_spacing(10); g.set_row_spacing(1)
+            g.attach(hdr("segnale"), 0, 0, 1, 1)
+            g.attach(hdr("valore", Gtk.Align.END), 1, 0, 1, 1)
+            g.attach(hdr("u.m."), 2, 0, 1, 1)
             for j in range(plot_count):
-                cb = Gtk.CheckButton()
-                cb.set_active(key in plot_signals[j])
-                cb.set_halign(Gtk.Align.CENTER)
-                cb.connect("toggled", on_check_toggled, key, j)
-                comp_grid.attach(cb, j + 3, i + 1, 1, 1)
-                comp_checks[(key, j)] = cb
+                g.attach(hdr(f"P{j+1}", Gtk.Align.CENTER), j + 3, 0, 1, 1)
+            for i, key in enumerate(keys):
+                if key not in SIG_BY_KEY: continue
+                meta = SIG_BY_KEY[key]
+                color_hex = f"#{int(meta['r']*255):02x}{int(meta['g']*255):02x}{int(meta['b']*255):02x}"
+                sl = Gtk.Label()
+                sl.set_markup(f'<span font_family="monospace" foreground="{color_hex}" size="small">● {meta["name"]}</span>')
+                sl.set_halign(Gtk.Align.START); sl.set_use_markup(True)
+                g.attach(sl, 0, i + 1, 1, 1)
 
-        update_plot_titles()
-        comp_box.append(comp_grid)
+                vl = Gtk.Label(); vl.set_halign(Gtk.Align.END)
+                vl.set_markup('<span font_family="monospace" foreground="#f1f5f9" font_weight="bold" size="small">—</span>')
+                g.attach(vl, 1, i + 1, 1, 1)
+                value_labels[key] = vl
 
-        # --- Sezione "moduli e derivati" (non plottabili) ---
-        sep_mod = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
-        sep_mod.set_margin_top(6); sep_mod.set_margin_bottom(2)
-        comp_box.append(sep_mod)
+                ul = Gtk.Label(); ul.set_halign(Gtk.Align.START)
+                ul.set_markup(f'<span font_family="monospace" foreground="#475569" size="x-small">{meta["unit"]}</span>')
+                g.attach(ul, 2, i + 1, 1, 1)
 
+                for j in range(plot_count):
+                    cb = Gtk.CheckButton()
+                    cb.set_active(key in plot_signals[j])
+                    cb.set_halign(Gtk.Align.CENTER)
+                    cb.connect("toggled", on_check_toggled, key, j)
+                    g.attach(cb, j + 3, i + 1, 1, 1)
+                    comp_checks[(key, j)] = cb
+            return g
+
+        comp_inner.append(build_signal_grid(SCALAR_KEYS))
+        comp_inner.append(build_signal_grid(DQ_KEYS))
+
+        # Terza colonna: moduli e derivati (a fianco, non sotto)
+        mod_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        mod_col.set_margin_start(4)
         mod_title = Gtk.Label(); mod_title.set_halign(Gtk.Align.START)
         mod_title.set_markup('<span font_family="monospace" font_weight="bold" foreground="#64748b" size="x-small">moduli e derivati</span>')
-        comp_box.append(mod_title)
+        mod_col.append(mod_title)
 
         mod_grid = Gtk.Grid()
         mod_grid.set_column_spacing(10); mod_grid.set_row_spacing(1)
@@ -1424,8 +1423,11 @@ def run():
             ul.set_markup(f'<span font_family="monospace" foreground="#475569" size="x-small">{unit}</span>')
             mod_grid.attach(ul, 2, i, 1, 1)
             derived_labels[key] = vl
-        comp_box.append(mod_grid)
+        mod_col.append(mod_grid)
+        comp_inner.append(mod_col)
 
+        update_plot_titles()
+        comp_box.append(comp_inner)
         dq_row.append(comp_box)
 
         vbox.append(dq_row)
