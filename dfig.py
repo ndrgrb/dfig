@@ -89,21 +89,129 @@ RESYNC_LAG = 0.200               # se sim resta indietro di > 200 ms, riaggancia
 INT_EULER, INT_RK4, INT_RK45 = 0, 1, 2
 
 # === Controllo (passato ai kernel JIT come array) ===
-# CTRL[0] = mode  (0 = open-loop V_r, 1 = DPC bang-bang)
-# CTRL[1] = Ps_ref [W]    riferimento di potenza attiva statorica (DPC)
-# CTRL[2] = Qs_ref [VAR]  riferimento di potenza reattiva statorica (DPC)
-# CTRL[3] = h_P    [W]    semibanda isteresi su P_s
-# CTRL[4] = h_Q    [VAR]  semibanda isteresi su Q_s
-# CTRL[5] = Vdc    [V]    ampiezza dei vettori di tensione rotorica (DPC)
-NCTRL = 6
+# CTRL[0]  = mode  (0=open-loop V_r, 1=DPC, 2=VC stator-flux + speed PI)
+# DPC:
+#   CTRL[1] = Ps_ref [W]
+#   CTRL[2] = Qs_ref [VAR]
+#   CTRL[3] = h_P    [W]
+#   CTRL[4] = h_Q    [VAR]
+#   CTRL[5] = Vdc    [V]   ampiezza vettori tensione rotorica
+# VC (vector control con orientamento al flusso statorico,
+#     PF=1 lato statore + inseguimento di velocità):
+#   CTRL[6]  = wm_ref [rad/s mech]   riferimento velocità
+#   CTRL[7]  = P_w                   P del PI di velocità   (su errore fraz.)
+#   CTRL[8]  = I_w                   I del PI di velocità
+#   CTRL[9]  = P_id                  P del PI sulla i_r,d
+#   CTRL[10] = I_id                  I del PI sulla i_r,d
+#   CTRL[11] = P_iq                  P del PI sulla i_r,q
+#   CTRL[12] = I_iq                  I del PI sulla i_r,q
+NCTRL = 13
 C_MODE, C_PSREF, C_QSREF, C_HP, C_HQ, C_VDC = 0, 1, 2, 3, 4, 5
-MODE_OPEN, MODE_DPC = 0.0, 1.0
-CTRL_DEFAULT = np.array([MODE_OPEN, 0.0, 0.0, 500.0, 500.0, 100.0], dtype=np.float64)
+C_WMREF, C_PW, C_IW, C_PID, C_IID, C_PIQ, C_IIQ = 6, 7, 8, 9, 10, 11, 12
+MODE_OPEN, MODE_DPC, MODE_VC = 0.0, 1.0, 2.0
+CTRL_DEFAULT = np.array([
+    MODE_OPEN,
+    0.0, 0.0, 500.0, 500.0, 100.0,           # DPC
+    2*math.pi*50.0/3.0,                       # wm_ref ≈ velocità di sincronismo
+    1.0e4, 1.0e5,                             # P_w, I_w  (errore fraz.)
+    0.1, 1.0,                                 # P_id, I_id
+    1.0, 10.0,                                # P_iq, I_iq
+], dtype=np.float64)
+
+# === Stato del controllore (3 integratori PI + tempo ultimo campione) ===
+# Persiste tra le iterazioni dell'engine; reset su simulation reset / cambio modo.
+NCS = 4
+CS_INT_ID, CS_INT_IQ, CS_INT_W, CS_T_LAST = 0, 1, 2, 3
 
 
 # ============================================================
 # Numba kernels
 # ============================================================
+
+@njit(cache=True, fastmath=True, nogil=True)
+def _compute_vc(s, Vs, ws, params, ctrl, ctrl_state, out_v):
+    """Controllo vettoriale a flusso statorico orientato + speed PI.
+    Convenzione di Park del simulatore: V_s,d = V_s, V_s,q = 0
+        → a regime φ_s,d ≈ 0,  φ_s,q ≈ -V_s/ω_s
+        ⇒ rispetto alla tesi i ruoli di d e q sono SCAMBIATI:
+            P_s ≈ -V_s·M/L_s · i_r,d   →  coppia ∝ i_r,d
+            Q_s ≈  V_s²/(L_s ω_s) + V_s·M/L_s · i_r,q
+                                       →  Q_s = 0  ⇒  i_r,q* = -V_s/(M ω_s)
+
+    Schema:
+        i_r,q*  = -V_s/(M·ω_s)              (costante, fattore di potenza unitario)
+        i_r,d*  = -PI_w(ω_m err)              (anello esterno: Ce ∝ -i_r,d)
+        v_r,d   = PI_d(i_r,d err) + ff_d
+        v_r,q   = PI_q(i_r,q err) + ff_q
+    Reiettori (decoupling) ottenuti sostituendo ψ_r,d = α·i_r,d,
+    ψ_r,q = α·i_r,q - M·V_s/(L_s·ω_s) nelle equazioni di rotore:
+        ff_d = -slip·α·i_r,q + slip·M·V_s/(L_s·ω_s)
+        ff_q = +slip·α·i_r,d
+    con α = (L_s·L_r - M²)/L_s, slip = ω_s - n_p·ω_m.
+    Saturazione hard del modulo |V_r| ≤ V_MAX (realismo converter).
+    """
+    Ls = params[2]; Lr = params[3]; M_ = params[4]; NP = params[5]
+    D = Ls * Lr - M_ * M_
+    alpha = D / Ls
+    psd = s[0]; psq = s[1]; prd = s[2]; prq = s[3]
+    wm = s[4]; t = s[6]
+    ird = (Ls * prd - M_ * psd) / D
+    irq = (Ls * prq - M_ * psq) / D
+
+    # dt dal precedente campione di controllo (clamp di sicurezza)
+    dt = t - ctrl_state[3]
+    if dt < 0.0: dt = 0.0
+    if dt > 1e-2: dt = 1e-2
+
+    ws_safe = ws if abs(ws) > 1e-3 else 1e-3
+
+    # === Anello velocità (esterno) → riferimento i_r,d* ===
+    # Ce ∝ -i_r,d ⇒ per accelerare serve i_r,d < 0
+    wm_ref = ctrl[6]; P_w = ctrl[7]; I_w = ctrl[8]
+    ref_safe = wm_ref if abs(wm_ref) > 1.0 else 1.0
+    e_w = (wm_ref - wm) / ref_safe
+    ctrl_state[2] += e_w * dt
+    ird_ref = -(P_w * e_w + I_w * ctrl_state[2])
+    IRD_MAX = 5000.0
+    if ird_ref > IRD_MAX: ird_ref = IRD_MAX
+    if ird_ref < -IRD_MAX: ird_ref = -IRD_MAX
+
+    # === Riferimento i_r,q* costante per Q_s = 0 ===
+    irq_ref = -Vs / (M_ * ws_safe)
+
+    # === Anelli interni di corrente ===
+    P_id = ctrl[9]; I_id = ctrl[10]
+    e_d = ird_ref - ird
+    ctrl_state[0] += e_d * dt
+    vrd_pi = P_id * e_d + I_id * ctrl_state[0]
+
+    P_iq = ctrl[11]; I_iq = ctrl[12]
+    e_q = irq_ref - irq
+    ctrl_state[1] += e_q * dt
+    vrq_pi = P_iq * e_q + I_iq * ctrl_state[1]
+
+    # === Reiettori (decoupling feedforward) ===
+    slip = ws - NP * wm
+    vrd_ff = -slip * alpha * irq + slip * M_ * Vs / (Ls * ws_safe)
+    vrq_ff = +slip * alpha * ird
+
+    vrd = vrd_pi + vrd_ff
+    vrq = vrq_pi + vrq_ff
+
+    # Saturazione modulo |V_r|
+    V_MAX = 500.0
+    Vmag2 = vrd*vrd + vrq*vrq
+    if Vmag2 > V_MAX*V_MAX:
+        Vmag = math.sqrt(Vmag2)
+        sc = V_MAX / Vmag
+        vrd *= sc; vrq *= sc
+        # Anti-windup grossolano: scala anche gli integratori
+        ctrl_state[0] *= sc; ctrl_state[1] *= sc
+
+    out_v[0] = vrd
+    out_v[1] = vrq
+    ctrl_state[3] = t
+
 
 @njit(cache=True, fastmath=True, nogil=True)
 def _compute_dpc(s, Vs, params, ctrl, out_v):
@@ -229,7 +337,20 @@ def _maybe_sample(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params,
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def advance_euler(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl,
+def _sample_held(s, Vs, ws, params, ctrl, ctrl_state, v_buf):
+    """Ritorna (vrd_h, vrq_h) campionati dallo stato secondo il modo:
+       1 = DPC bang-bang, 2 = VC vettoriale, altro = (0,0)."""
+    m = ctrl[0]
+    if m > 1.5:
+        _compute_vc(s, Vs, ws, params, ctrl, ctrl_state, v_buf)
+    elif m > 0.5:
+        _compute_dpc(s, Vs, params, ctrl, v_buf)
+    else:
+        v_buf[0] = 0.0; v_buf[1] = 0.0
+
+
+@njit(cache=True, fastmath=True, nogil=True)
+def advance_euler(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl, ctrl_state,
                   last_log_t, samples, max_samples):
     k = np.empty(7)
     obs = np.empty(NH)
@@ -237,12 +358,11 @@ def advance_euler(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl,
     use_held = 1.0 if ctrl[0] > 0.5 else 0.0
     n_steps = 0
     n_samples = 0
+    vrd_h = 0.0; vrq_h = 0.0
     while s[6] < t_target and n_steps < MAX_STEPS_PER_ITER:
         if use_held > 0.5:
-            _compute_dpc(s, Vs, params, ctrl, v_buf)
+            _sample_held(s, Vs, ws, params, ctrl, ctrl_state, v_buf)
             vrd_h = v_buf[0]; vrq_h = v_buf[1]
-        else:
-            vrd_h = 0.0; vrq_h = 0.0
         deriv(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k)
         for i in range(7):
             s[i] += dt * k[i]
@@ -254,19 +374,18 @@ def advance_euler(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl,
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def advance_rk4(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl,
+def advance_rk4(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl, ctrl_state,
                 last_log_t, samples, max_samples):
     k1 = np.empty(7); k2 = np.empty(7); k3 = np.empty(7); k4 = np.empty(7)
     tmp = np.empty(7); obs = np.empty(NH); v_buf = np.empty(2)
     use_held = 1.0 if ctrl[0] > 0.5 else 0.0
     n_steps = 0
     n_samples = 0
+    vrd_h = 0.0; vrq_h = 0.0
     while s[6] < t_target and n_steps < MAX_STEPS_PER_ITER:
         if use_held > 0.5:
-            _compute_dpc(s, Vs, params, ctrl, v_buf)
+            _sample_held(s, Vs, ws, params, ctrl, ctrl_state, v_buf)
             vrd_h = v_buf[0]; vrq_h = v_buf[1]
-        else:
-            vrd_h = 0.0; vrq_h = 0.0
         deriv(s,   Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k1)
         for i in range(7): tmp[i] = s[i] + 0.5 * dt * k1[i]
         deriv(tmp, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, k2)
@@ -287,7 +406,7 @@ def advance_rk4(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl,
 # Dormand-Prince 5(4) coefficients
 @njit(cache=True, fastmath=True, nogil=True)
 def advance_rk45(s, t_target, Vs, ws, Vr, wr, Cl,
-                 dt_init, dt_min, dt_max, rtol, params, ctrl,
+                 dt_init, dt_min, dt_max, rtol, params, ctrl, ctrl_state,
                  last_log_t, samples, max_samples):
     k1 = np.empty(7); k2 = np.empty(7); k3 = np.empty(7); k4 = np.empty(7)
     k5 = np.empty(7); k6 = np.empty(7); k7 = np.empty(7)
@@ -318,7 +437,7 @@ def advance_rk45(s, t_target, Vs, ws, Vr, wr, Cl,
             break
 
         if sample_dpc:
-            _compute_dpc(s, Vs, params, ctrl, v_buf)
+            _sample_held(s, Vs, ws, params, ctrl, ctrl_state, v_buf)
             vrd_h = v_buf[0]; vrq_h = v_buf[1]
             sample_dpc = False  # già campionato per questo tentativo
 
@@ -400,15 +519,18 @@ def warmup_jit():
     s[1] = -2.2; s[3] = -2.2; s[4] = 100.0
     samples = np.empty((4, NH))
     p = PARAMS_DEFAULT.copy()
-    c_ol = CTRL_DEFAULT.copy()
+    c_ol  = CTRL_DEFAULT.copy()
     c_dpc = CTRL_DEFAULT.copy(); c_dpc[C_MODE] = MODE_DPC
-    advance_euler(s.copy(), 1e-3, 690.0, 314.159, 0.0, 0.0, 0.0, 1e-4, p, c_ol, 0.0, samples, 4)
-    advance_rk4(s.copy(),   1e-3, 690.0, 314.159, 0.0, 0.0, 0.0, 1e-4, p, c_ol, 0.0, samples, 4)
+    c_vc  = CTRL_DEFAULT.copy(); c_vc[C_MODE]  = MODE_VC
+    cs = np.zeros(NCS)
+    advance_euler(s.copy(), 1e-3, 690.0, 314.159, 0.0, 0.0, 0.0, 1e-4, p, c_ol, cs.copy(), 0.0, samples, 4)
+    advance_rk4(s.copy(),   1e-3, 690.0, 314.159, 0.0, 0.0, 0.0, 1e-4, p, c_ol, cs.copy(), 0.0, samples, 4)
     advance_rk45(s.copy(),  1e-3, 690.0, 314.159, 0.0, 0.0, 0.0,
-                 1e-4, 1e-7, 1e-3, 1e-4, p, c_ol, 0.0, samples, 4)
-    # Compila anche il ramo DPC del kernel
+                 1e-4, 1e-7, 1e-3, 1e-4, p, c_ol, cs.copy(), 0.0, samples, 4)
     advance_rk45(s.copy(),  1e-3, 690.0, 314.159, 0.0, 0.0, 0.0,
-                 1e-4, 1e-7, 1e-3, 1e-4, p, c_dpc, 0.0, samples, 4)
+                 1e-4, 1e-7, 1e-3, 1e-4, p, c_dpc, cs.copy(), 0.0, samples, 4)
+    advance_rk45(s.copy(),  1e-3, 690.0, 314.159, 0.0, 0.0, 0.0,
+                 1e-4, 1e-7, 1e-3, 1e-4, p, c_vc, cs.copy(), 0.0, samples, 4)
 
 
 # ============================================================
@@ -432,14 +554,22 @@ class SimEngine:
             "rt_lock": True,
             "speed_factor": 1.0,   # target = wall × speed
             # === Controllo lato rotore ===
-            # mode: "open" (Vr/fr open-loop) o "dpc" (Direct Power Control)
+            # mode: "open" | "dpc" | "vc"
             "mode": "open",
+            # DPC
             "Ps_ref": 0.0,         # W
             "Qs_ref": 0.0,         # VAR
-            "h_P": 500.0,          # W,  semibanda isteresi su P_s
-            "h_Q": 500.0,          # VAR, semibanda isteresi su Q_s
-            "Vdc_dpc": 100.0,      # V,  ampiezza vettori di tensione rotore in DPC
+            "h_P": 500.0,          # W
+            "h_Q": 500.0,          # VAR
+            "Vdc_dpc": 100.0,      # V
+            # VC (orientamento al flusso statorico, PF=1 + speed)
+            "wm_ref": 2.0 * math.pi * 50.0 / 3.0,  # rad/s mech, ≈ sincronismo
+            "P_w": 1.0e4, "I_w": 1.0e5,            # PI velocità (errore fraz.)
+            "P_id": 0.1, "I_id": 1.0,               # PI i_r,d
+            "P_iq": 1.0, "I_iq": 10.0,              # PI i_r,q
         }
+        # Stato persistente del controllore (3 integratori PI + tempo ultimo sample)
+        self.ctrl_state = np.zeros(NCS)
         self.stats = {
             "compiled": False,
             "running": False,
@@ -476,6 +606,8 @@ class SimEngine:
         self._t_wall_anchor = time.perf_counter()
         self._t_sim_anchor = 0.0
         self._dt_rk45 = 1e-4
+        # Reset PI integrators e last-sample-time
+        self.ctrl_state[:] = 0.0
 
     def reset(self):
         with self.lock:
@@ -540,10 +672,17 @@ class SimEngine:
         with self.lock:
             speed_changed = ("speed_factor" in kw and
                              kw["speed_factor"] != self.ctrl.get("speed_factor"))
+            mode_changed = ("mode" in kw and
+                            kw["mode"] != self.ctrl.get("mode"))
             self.ctrl.update(kw)
             if speed_changed and self.running:
                 # Ricalibra ancore al qui-e-ora per evitare salti del target
                 self._rebase_anchor_locked()
+            if mode_changed:
+                # Cambio modo controllore: azzera integratori PI per evitare
+                # transitori dovuti a stato stantìo
+                self.ctrl_state[:] = 0.0
+                self.ctrl_state[CS_T_LAST] = self.state[6]
 
     # === main loop ===
     def _loop(self):
@@ -600,8 +739,13 @@ class SimEngine:
                 h_P = self.ctrl.get("h_P", 500.0)
                 h_Q = self.ctrl.get("h_Q", 500.0)
                 Vdc_dpc = self.ctrl.get("Vdc_dpc", 100.0)
+                wm_ref = self.ctrl.get("wm_ref", 2.0*math.pi*50.0/3.0)
+                P_w = self.ctrl.get("P_w", 1e4); I_w = self.ctrl.get("I_w", 1e5)
+                P_id = self.ctrl.get("P_id", 0.1); I_id = self.ctrl.get("I_id", 1.0)
+                P_iq = self.ctrl.get("P_iq", 1.0); I_iq = self.ctrl.get("I_iq", 10.0)
                 state_local = self.state.copy()
                 params_local = self.params.copy()
+                ctrl_state_local = self.ctrl_state.copy()
                 last_log_t = self._last_log_t
                 t_wall_anchor = self._t_wall_anchor
                 t_sim_anchor = self._t_sim_anchor
@@ -609,9 +753,13 @@ class SimEngine:
 
             ws = 2.0 * math.pi * fs
             wr = 2.0 * math.pi * fr
+            mode_code = (MODE_VC if mode_str == "vc"
+                         else MODE_DPC if mode_str == "dpc"
+                         else MODE_OPEN)
             ctrl_arr = np.array([
-                MODE_DPC if mode_str == "dpc" else MODE_OPEN,
+                mode_code,
                 Ps_ref, Qs_ref, h_P, h_Q, Vdc_dpc,
+                wm_ref, P_w, I_w, P_id, I_id, P_iq, I_iq,
             ], dtype=np.float64)
 
             now = time.perf_counter()
@@ -651,18 +799,21 @@ class SimEngine:
             n_rej = 0; err_max = 0.0; dt_avg = dt_max
             if integrator == INT_EULER:
                 n_steps, n_samples, last_log_t = advance_euler(
-                    state_local, t_target, Vs, ws, Vr, wr, Cl, dt_max, params_local, ctrl_arr,
+                    state_local, t_target, Vs, ws, Vr, wr, Cl, dt_max,
+                    params_local, ctrl_arr, ctrl_state_local,
                     last_log_t, sample_buf, MAX_SAMPLES_PER_TICK)
             elif integrator == INT_RK4:
                 n_steps, n_samples, last_log_t = advance_rk4(
-                    state_local, t_target, Vs, ws, Vr, wr, Cl, dt_max, params_local, ctrl_arr,
+                    state_local, t_target, Vs, ws, Vr, wr, Cl, dt_max,
+                    params_local, ctrl_arr, ctrl_state_local,
                     last_log_t, sample_buf, MAX_SAMPLES_PER_TICK)
             else:  # RK45
                 dt_min = max(1e-9, dt_max * 1e-4)
                 (n_steps, n_samples, last_log_t,
                  n_rej, err_max, dt_avg, dt_rk45) = advance_rk45(
                     state_local, t_target, Vs, ws, Vr, wr, Cl,
-                    dt_rk45, dt_min, dt_max, rtol, params_local, ctrl_arr,
+                    dt_rk45, dt_min, dt_max, rtol,
+                    params_local, ctrl_arr, ctrl_state_local,
                     last_log_t, sample_buf, MAX_SAMPLES_PER_TICK)
 
             t1 = time.perf_counter()
@@ -672,6 +823,7 @@ class SimEngine:
             # Push samples + commit stato — scrittura nel ring buffer (un memcpy)
             with self.lock:
                 self.state[:] = state_local
+                self.ctrl_state[:] = ctrl_state_local
                 self._last_log_t = last_log_t
                 self._dt_rk45 = dt_rk45
                 if n_samples > 0:
@@ -1278,16 +1430,18 @@ def run():
         fslip_lbl = Gtk.Label(); fslip_lbl.set_halign(Gtk.Align.START)
         fslip_lbl.set_markup('<span font_family="monospace" foreground="#78716c" size="small">f_slip = 0.0 Hz</span>')
 
-        # Toggle modo: open-loop (Vr/fr imposti) ↔ DPC (riferimenti P_s*, Q_s*)
+        # Toggle modo: open-loop ↔ DPC ↔ VC (vector control PF=1 + speed)
         mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         mode_lbl = Gtk.Label()
         mode_lbl.set_markup('<span font_family="monospace" foreground="#94a3b8" size="small">modo</span>')
         mode_lbl.set_halign(Gtk.Align.START); mode_lbl.set_hexpand(True)
         rb_open = Gtk.ToggleButton(label="open-loop")
         rb_dpc  = Gtk.ToggleButton(label="DPC")
-        rb_dpc.set_group(rb_open)
+        rb_vc   = Gtk.ToggleButton(label="VC PF=1")
+        rb_dpc.set_group(rb_open); rb_vc.set_group(rb_open)
         rb_open.set_active(True)
-        mode_box.append(mode_lbl); mode_box.append(rb_open); mode_box.append(rb_dpc)
+        mode_box.append(mode_lbl); mode_box.append(rb_open)
+        mode_box.append(rb_dpc); mode_box.append(rb_vc)
 
         # Sliders open-loop
         ol_vr = make_slider("|V_r|", 0, 0, 200, 0.5, lambda v: engine.set_ctrl(Vr=v))
@@ -1311,17 +1465,44 @@ def run():
         dpc_box.append(dpc_vdc);   dpc_box.append(dpc_hp); dpc_box.append(dpc_hq)
         dpc_box.set_visible(False)
 
+        # Sliders VC: riferimento velocità + guadagni dei 3 PI + reiettori
+        vc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        wm_sync_giri = (2*math.pi*50.0/3.0) / (2*math.pi)  # ≈ 16.67 giri/s a 50 Hz, 3pp
+        vc_wmref = make_slider("ω̃_m [giri/s]", wm_sync_giri, 0, 30, 0.1,
+                               lambda v: engine.set_ctrl(wm_ref=v * 2*math.pi))
+        vc_pw = make_slider("P_w (vel.)", 1e4, 0, 5e4, 100,
+                            lambda v: engine.set_ctrl(P_w=v))
+        vc_iw = make_slider("I_w (vel.)", 1e5, 0, 5e5, 1000,
+                            lambda v: engine.set_ctrl(I_w=v))
+        vc_pid = make_slider("P_i_d", 0.1, 0, 5, 0.05,
+                             lambda v: engine.set_ctrl(P_id=v))
+        vc_iid = make_slider("I_i_d", 1.0, 0, 50, 0.1,
+                             lambda v: engine.set_ctrl(I_id=v))
+        vc_piq = make_slider("P_i_q", 1.0, 0, 50, 0.1,
+                             lambda v: engine.set_ctrl(P_iq=v))
+        vc_iiq = make_slider("I_i_q", 10.0, 0, 200, 1,
+                             lambda v: engine.set_ctrl(I_iq=v))
+        vc_box.append(vc_wmref)
+        vc_box.append(vc_pw); vc_box.append(vc_iw)
+        vc_box.append(vc_pid); vc_box.append(vc_iid)
+        vc_box.append(vc_piq); vc_box.append(vc_iiq)
+        vc_box.set_visible(False)
+
         def on_mode_toggled(_btn):
-            if rb_dpc.get_active():
+            if rb_vc.get_active():
+                engine.set_ctrl(mode="vc")
+                ol_box.set_visible(False); dpc_box.set_visible(False); vc_box.set_visible(True)
+            elif rb_dpc.get_active():
                 engine.set_ctrl(mode="dpc")
-                ol_box.set_visible(False); dpc_box.set_visible(True)
+                ol_box.set_visible(False); dpc_box.set_visible(True);  vc_box.set_visible(False)
             else:
                 engine.set_ctrl(mode="open")
-                ol_box.set_visible(True);  dpc_box.set_visible(False)
+                ol_box.set_visible(True);  dpc_box.set_visible(False); vc_box.set_visible(False)
         rb_open.connect("toggled", on_mode_toggled)
         rb_dpc.connect("toggled", on_mode_toggled)
+        rb_vc.connect("toggled", on_mode_toggled)
 
-        cbox.append(panel("ROTORE", "#ef4444", [mode_box, ol_box, dpc_box]))
+        cbox.append(panel("ROTORE", "#ef4444", [mode_box, ol_box, dpc_box, vc_box]))
 
         cbox.append(panel("CARICO", "#22c55e", [
             make_slider("C_load [Nm]", 0, -15000, 15000, 100, lambda v: engine.set_ctrl(Cl=v)),
@@ -1719,7 +1900,8 @@ def run():
             Ce = NP_p * M_p * (isq*ird - isd*irq)
             Ps = ctrl["Vs"] * isd
             Qs = -ctrl["Vs"] * isq
-            if ctrl.get("mode", "open") == "dpc":
+            mode_str = ctrl.get("mode", "open")
+            if mode_str == "dpc":
                 # Stessa logica del kernel: isteresi 3-livelli su (Ps, Qs)
                 hP = ctrl.get("h_P", 500.0); hQ = ctrl.get("h_Q", 500.0)
                 Vdc = ctrl.get("Vdc_dpc", 100.0)
@@ -1728,6 +1910,14 @@ def run():
                 sP = -1.0 if eP > hP else (+1.0 if eP < -hP else 0.0)
                 sQ = +1.0 if eQ > hQ else (-1.0 if eQ < -hQ else 0.0)
                 vrd = Vdc * sP; vrq = Vdc * sQ
+            elif mode_str == "vc":
+                # Stima visiva di v_r (solo reiettori): il PI integrato vive
+                # nel kernel; qui basta un'indicazione qualitativa per Pr/Qr.
+                ws_safe = ws_now if abs(ws_now) > 1e-3 else 1e-3
+                alpha = (Ls_p*Lr_p - M_p*M_p) / Ls_p
+                slip_w = ws_now - NP_p*wm_now
+                vrd = -slip_w * alpha * irq + slip_w * M_p * ctrl["Vs"] / (Ls_p * ws_safe)
+                vrq = +slip_w * alpha * ird
             else:
                 a = 2*math.pi*ctrl["fr"]*t_now - ws_now*t_now + NP_p*st[5]
                 vrd = ctrl["Vr"]*math.cos(a); vrq = ctrl["Vr"]*math.sin(a)
