@@ -1279,8 +1279,9 @@ class DfigWindow(QtWidgets.QMainWindow):
         cbox.addWidget(panel("SIMULAZIONE", "#eab308",
                              [sim_info, self._speed_slider,
                               self._sat_btn, self._sl_psi_sat]))
-        # Trailing stretch keeps panels packed at the top of the column.
-        cbox.addStretch(1)
+        # AUTOPILOT, PARAMETRI MACCHINA, SEGNALI and the time-window slider are
+        # appended to cbox below, after they're created — see further down. We
+        # add the trailing stretch only at the very end (after all sections).
 
         # ---- Three-column main splitter ----
         # Left: stacked control panels (cbox built above), inside a vertical
@@ -1296,8 +1297,8 @@ class DfigWindow(QtWidgets.QMainWindow):
         ctrl_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         ctrl_scroll.setHorizontalScrollBarPolicy(
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        ctrl_scroll.setMinimumWidth(340)
-        ctrl_scroll.setMaximumWidth(440)
+        ctrl_scroll.setMinimumWidth(400)
+        ctrl_scroll.setMaximumWidth(520)
 
         # Center column — dq plots stacked
         traces_curr = [
@@ -1374,7 +1375,8 @@ class DfigWindow(QtWidgets.QMainWindow):
         tw_row.addWidget(tw_lbl)
         tw_row.addWidget(self._tw_slider, 1)
         tw_row.addWidget(self._tw_val)
-        v.addLayout(tw_row)
+        # Note: tw_row is appended to cbox at the bottom (with the other
+        # collapsible sections), not to v.
 
         # ---- Machine parameters grid (collapsible) ----
         # State: which preset's nominal bases (V_n, S_n, f_s) are used to
@@ -1428,7 +1430,8 @@ class DfigWindow(QtWidgets.QMainWindow):
         param_section = CollapsibleSection(
             "PARAMETRI MACCHINA · editabili (Invio | ▼/▲ ±10%)",
             param_inner, expanded=True)
-        v.addWidget(center_widget(param_section, 720))
+        # param_section is appended to cbox at the bottom with the other
+        # collapsibles, see "Append collapsible sections to left column" below.
         # Initial pu readout (engine defaults match preset 0's bases).
         self._refresh_pu_readout()
 
@@ -1437,14 +1440,14 @@ class DfigWindow(QtWidgets.QMainWindow):
         comp_box = QtWidgets.QVBoxLayout(comp_inner_w)
         comp_box.setContentsMargins(6, 6, 6, 6); comp_box.setSpacing(2)
 
-        comp_inner = QtWidgets.QHBoxLayout(); comp_inner.setSpacing(18)
         self._comp_checks = {}
         self._value_labels = {}
-        comp_inner.addLayout(self._build_signal_grid(SCALAR_KEYS))
-        comp_inner.addLayout(self._build_signal_grid(DQ_KEYS))
-        comp_inner.addLayout(self._build_signal_grid(MOD_KEYS))
-        comp_inner.addStretch(1)
-        comp_box.addLayout(comp_inner)
+        unified = self._build_unified_signal_grid([
+            ("scalari", SCALAR_KEYS),
+            ("dq", DQ_KEYS),
+            ("moduli / derivati", MOD_KEYS),
+        ])
+        comp_box.addLayout(unified)
 
         # Stacked toggle row (one per plot)
         stack_row = QtWidgets.QHBoxLayout(); stack_row.setSpacing(8)
@@ -1471,7 +1474,6 @@ class DfigWindow(QtWidgets.QMainWindow):
 
         composer = CollapsibleSection("SEGNALI · valore istantaneo · plot",
                                       comp_inner_w, expanded=True)
-        v.addWidget(center_widget(composer, 1400))
 
         # ---- Autopilot panel ----
         auto_inner = QtWidgets.QWidget()
@@ -1520,7 +1522,16 @@ class DfigWindow(QtWidgets.QMainWindow):
         autopilot_section = CollapsibleSection(
             "AUTOPILOT · VC mode (esplorazione casi)",
             auto_inner, expanded=True)
-        v.addWidget(center_widget(autopilot_section, 720))
+
+        # ---- Append all collapsible sections + time-window slider to the
+        # left column (cbox), in order, then close with the stretch. They
+        # were created out-of-order above because they cross-reference
+        # widgets that needed to exist first.
+        cbox.addWidget(autopilot_section)
+        cbox.addWidget(param_section)
+        cbox.addWidget(composer)
+        cbox.addLayout(tw_row)
+        cbox.addStretch(1)
 
         # ---- Footer ----
         ft_row = QtWidgets.QHBoxLayout()
@@ -1545,7 +1556,12 @@ class DfigWindow(QtWidgets.QMainWindow):
         # title-update callback didn't fire).
         self._update_plot_titles()
 
-    def _build_signal_grid(self, keys):
+    def _build_unified_signal_grid(self, groups):
+        """Single QGridLayout listing all signals as: ● name | value | u.m. |
+        P1 P2 P3. ``groups`` is a list of (title, [keys]); each group is
+        preceded by a section divider row spanning all columns. Used to fit
+        the composer into the narrow left column instead of three side-by-
+        side mini-grids."""
         g = QtWidgets.QGridLayout()
         g.setHorizontalSpacing(10); g.setVerticalSpacing(1)
 
@@ -1556,57 +1572,80 @@ class DfigWindow(QtWidgets.QMainWindow):
             l.setAlignment(align | QtCore.Qt.AlignmentFlag.AlignVCenter)
             return l
 
+        def section_hdr(text):
+            l = QtWidgets.QLabel()
+            l.setText(htm(f"── {text} ──", color="#64748b",
+                          size="x-small", bold=True))
+            l.setTextFormat(QtCore.Qt.TextFormat.RichText)
+            l.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft |
+                           QtCore.Qt.AlignmentFlag.AlignVCenter)
+            return l
+
+        n_cols = 3 + self._plot_count
+
+        # Column headers — row 0
         g.addWidget(hdr("segnale"), 0, 0)
         g.addWidget(hdr("valore", QtCore.Qt.AlignmentFlag.AlignRight), 0, 1)
         g.addWidget(hdr("u.m."), 0, 2)
         for j in range(self._plot_count):
-            g.addWidget(hdr(f"P{j+1}", QtCore.Qt.AlignmentFlag.AlignHCenter), 0, j + 3)
+            g.addWidget(hdr(f"P{j+1}", QtCore.Qt.AlignmentFlag.AlignHCenter),
+                        0, j + 3)
 
-        for i, key in enumerate(keys):
-            if key not in SIG_BY_KEY: continue
-            meta = SIG_BY_KEY[key]
-            color_hex = f"#{int(meta['r']*255):02x}{int(meta['g']*255):02x}{int(meta['b']*255):02x}"
-            sl = QtWidgets.QLabel()
-            sl.setText(htm(f"● {meta['name']}", color=color_hex))
-            sl.setTextFormat(QtCore.Qt.TextFormat.RichText)
-            g.addWidget(sl, i + 1, 0)
+        row = 1
+        for title, keys in groups:
+            sec = section_hdr(title)
+            g.addWidget(sec, row, 0, 1, n_cols)
+            row += 1
 
-            vl = QtWidgets.QLabel()
-            vl.setText(htm("—", bold=True))
-            vl.setTextFormat(QtCore.Qt.TextFormat.RichText)
-            vl.setMinimumWidth(72)
-            vl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-            g.addWidget(vl, i + 1, 1)
-            self._value_labels[key] = vl
+            for key in keys:
+                if key not in SIG_BY_KEY:
+                    continue
+                meta = SIG_BY_KEY[key]
+                color_hex = (f"#{int(meta['r']*255):02x}"
+                             f"{int(meta['g']*255):02x}"
+                             f"{int(meta['b']*255):02x}")
+                sl = QtWidgets.QLabel()
+                sl.setText(htm(f"● {meta['name']}", color=color_hex))
+                sl.setTextFormat(QtCore.Qt.TextFormat.RichText)
+                g.addWidget(sl, row, 0)
 
-            ul = QtWidgets.QLabel()
-            ul.setText(htm(meta["unit"], color="#475569", size="x-small"))
-            ul.setTextFormat(QtCore.Qt.TextFormat.RichText)
-            g.addWidget(ul, i + 1, 2)
+                vl = QtWidgets.QLabel()
+                vl.setText(htm("—", bold=True))
+                vl.setTextFormat(QtCore.Qt.TextFormat.RichText)
+                vl.setMinimumWidth(72)
+                vl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight |
+                                QtCore.Qt.AlignmentFlag.AlignVCenter)
+                g.addWidget(vl, row, 1)
+                self._value_labels[key] = vl
 
-            for j in range(self._plot_count):
-                cb = QtWidgets.QCheckBox()
-                cb.setChecked(key in self._plot_signals[j])
-                def make_h(k=key, j=j):
-                    def h(checked):
-                        if checked:
-                            if k not in self._plot_signals[j]:
-                                self._plot_signals[j].append(k)
-                        else:
-                            if k in self._plot_signals[j]:
-                                self._plot_signals[j].remove(k)
-                        self._y_persist.pop(j, None)
-                        self._update_plot_titles()
-                        for d in self._plot_drawing_areas:
-                            d.update()
-                    return h
-                cb.toggled.connect(make_h())
-                g.addWidget(cb, i + 1, j + 3, QtCore.Qt.AlignmentFlag.AlignHCenter)
-                self._comp_checks[(key, j)] = cb
-        # Trailing stretch absorbs vertical slack: when this column is shorter
-        # than its sibling (DQ has 8 entries, SCALAR has 14), the spare height
-        # goes to row N+1 instead of inflating the header row.
-        g.setRowStretch(len(keys) + 1, 1)
+                ul = QtWidgets.QLabel()
+                ul.setText(htm(meta["unit"], color="#475569", size="x-small"))
+                ul.setTextFormat(QtCore.Qt.TextFormat.RichText)
+                g.addWidget(ul, row, 2)
+
+                for j in range(self._plot_count):
+                    cb = QtWidgets.QCheckBox()
+                    cb.setChecked(key in self._plot_signals[j])
+                    def make_h(k=key, j=j):
+                        def h(checked):
+                            if checked:
+                                if k not in self._plot_signals[j]:
+                                    self._plot_signals[j].append(k)
+                            else:
+                                if k in self._plot_signals[j]:
+                                    self._plot_signals[j].remove(k)
+                            self._y_persist.pop(j, None)
+                            self._update_plot_titles()
+                            for d in self._plot_drawing_areas:
+                                d.update()
+                        return h
+                    cb.toggled.connect(make_h())
+                    g.addWidget(cb, row, j + 3,
+                                QtCore.Qt.AlignmentFlag.AlignHCenter)
+                    self._comp_checks[(key, j)] = cb
+                row += 1
+
+        g.setRowStretch(row, 1)
         return g
 
     # ---- draw_func factories ----
