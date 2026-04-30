@@ -846,37 +846,6 @@ class ParamInput(QtWidgets.QWidget):
         self._apply(v + 1 if self._int_only else v * 1.1)
 
 
-class CollapsibleSection(QtWidgets.QWidget):
-    """Header button + content widget. Click on the header toggles content
-    visibility and swaps the arrow (▼ expanded ↔ ▶ collapsed) in the title."""
-
-    def __init__(self, title, content_widget, expanded=True, parent=None):
-        super().__init__(parent)
-        self._title = title
-        self._content = content_widget
-        v = QtWidgets.QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        self._toggle = QtWidgets.QPushButton()
-        self._toggle.setStyleSheet(
-            "QPushButton { text-align: left; padding: 4px 8px; "
-            "background: #0f1420; border: 1px solid #1a2030; border-radius: 2px; "
-            "color: #94a3b8; font-family: monospace; font-weight: bold; } "
-            "QPushButton:hover { background: #1a2030; }")
-        self._toggle.clicked.connect(self._on_clicked)
-        v.addWidget(self._toggle)
-        v.addWidget(self._content)
-        # Set initial state by toggling (start in opposite state, then flip).
-        self._expanded = not expanded
-        self._on_clicked()
-
-    def _on_clicked(self):
-        self._expanded = not self._expanded
-        arrow = "▼" if self._expanded else "▶"
-        self._toggle.setText(f"{arrow}  {self._title}")
-        self._content.setVisible(self._expanded)
-
-
 def center_widget(widget, max_width):
     """Wrap a widget in an HBox with addStretch on both sides and a max-width
     clamp on the widget. Returns the container, ready for v.addWidget(...).
@@ -1277,8 +1246,7 @@ class DfigWindow(QtWidgets.QMainWindow):
             lambda x: self.engine.set_param(9, x), compact=True)
 
         cbox.addWidget(panel("SIMULAZIONE", "#eab308",
-                             [sim_info, self._speed_slider,
-                              self._sat_btn, self._sl_psi_sat]))
+                             [sim_info, self._speed_slider]))
         # AUTOPILOT, PARAMETRI MACCHINA, SEGNALI and the time-window slider are
         # appended to cbox below, after they're created — see further down. We
         # add the trailing stretch only at the very end (after all sections).
@@ -1427,11 +1395,14 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._pu_lbl.setWordWrap(True)
         pf_v.addWidget(self._pu_lbl)
 
-        param_section = CollapsibleSection(
-            "PARAMETRI MACCHINA · editabili (Invio | ▼/▲ ±10%)",
-            param_inner, expanded=True)
-        # param_section is appended to cbox at the bottom with the other
-        # collapsibles, see "Append collapsible sections to left column" below.
+        # --- saturation sub-panel, nested inside PARAMETRI MACCHINA ---
+        # The toggle and the ψ_s,sat slider both live here (they're machine
+        # properties more than simulation properties).
+        sat_subpanel = panel("SATURAZIONE MAGNETICA", "#f97316",
+                             [self._sat_btn, self._sl_psi_sat])
+        pf_v.addWidget(sat_subpanel)
+
+        param_section = panel("PARAMETRI MACCHINA", "#06b6d4", [param_inner])
         # Initial pu readout (engine defaults match preset 0's bases).
         self._refresh_pu_readout()
 
@@ -1472,8 +1443,7 @@ class DfigWindow(QtWidgets.QMainWindow):
         stack_row.addStretch(1)
         comp_box.addLayout(stack_row)
 
-        composer = CollapsibleSection("SEGNALI · valore istantaneo · plot",
-                                      comp_inner_w, expanded=True)
+        composer = panel("SEGNALI", "#64748b", [comp_inner_w])
 
         # ---- Autopilot panel ----
         auto_inner = QtWidgets.QWidget()
@@ -1519,9 +1489,7 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._auto_phase.setTextFormat(QtCore.Qt.TextFormat.RichText)
         auto_v.addWidget(self._auto_phase)
 
-        autopilot_section = CollapsibleSection(
-            "AUTOPILOT · VC mode (esplorazione casi)",
-            auto_inner, expanded=True)
+        autopilot_section = panel("AUTOPILOT", "#a855f7", [auto_inner])
 
         # ---- Append all collapsible sections + time-window slider to the
         # left column (cbox), in order, then close with the stretch. They
