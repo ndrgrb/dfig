@@ -33,6 +33,80 @@ PU_BANDS = {
     "Llr": (0.05,  0.25),
     "Lm":  (1.5,   6.0),
 }
+
+
+# ------------------------------------------------------------
+# Autopilot scenarios (VC mode only)
+# ------------------------------------------------------------
+# A scenario is a list of stages played sequentially. Each stage carries:
+#   dur:           stage duration in seconds
+#   desc:          short label shown in the UI during playback
+#   wm_factor:     (optional) setpoint = factor × ω_sync (sync = f_s/n_p)
+#   throttle:      (optional) load throttle ∈ [0, 1] applied to the C_load
+#                  fondoscala in generator mode (negative shaft torque)
+#   tan_phi:       (optional) hold value for tan(φ_s*)
+#   tan_phi_ramp:  (optional) tuple (a, b) — linear ramp from a→b over `dur`
+# The "ensure" dict applies once at scenario start (e.g. force generator mode).
+AUTOPILOT_SCENARIOS = [
+    {
+        "name": "step velocità · ascending  (sub → super)",
+        "stages": [
+            {"dur": 5.0, "wm_factor": 0.85, "desc": "0.85 · sync (sub)"},
+            {"dur": 5.0, "wm_factor": 0.95, "desc": "0.95 · sync (sub)"},
+            {"dur": 5.0, "wm_factor": 1.00, "desc": "sync"},
+            {"dur": 5.0, "wm_factor": 1.05, "desc": "1.05 · sync (super)"},
+            {"dur": 5.0, "wm_factor": 1.10, "desc": "1.10 · sync (super)"},
+            {"dur": 5.0, "wm_factor": 1.15, "desc": "1.15 · sync (super)"},
+        ],
+    },
+    {
+        "name": "step velocità · descending  (super → sub)",
+        "stages": [
+            {"dur": 5.0, "wm_factor": 1.15, "desc": "1.15 · sync (super)"},
+            {"dur": 5.0, "wm_factor": 1.10, "desc": "1.10 · sync (super)"},
+            {"dur": 5.0, "wm_factor": 1.05, "desc": "1.05 · sync (super)"},
+            {"dur": 5.0, "wm_factor": 1.00, "desc": "sync"},
+            {"dur": 5.0, "wm_factor": 0.95, "desc": "0.95 · sync (sub)"},
+            {"dur": 5.0, "wm_factor": 0.85, "desc": "0.85 · sync (sub)"},
+        ],
+    },
+    {
+        "name": "step velocità · cross-sync  (gioco attorno al sync)",
+        "stages": [
+            {"dur": 4.0, "wm_factor": 1.00, "desc": "sync"},
+            {"dur": 4.0, "wm_factor": 0.90, "desc": "sub 0.90"},
+            {"dur": 4.0, "wm_factor": 1.00, "desc": "sync"},
+            {"dur": 4.0, "wm_factor": 1.10, "desc": "super 1.10"},
+            {"dur": 4.0, "wm_factor": 1.00, "desc": "sync"},
+            {"dur": 4.0, "wm_factor": 0.85, "desc": "sub 0.85"},
+            {"dur": 4.0, "wm_factor": 1.15, "desc": "super 1.15"},
+            {"dur": 4.0, "wm_factor": 1.00, "desc": "sync"},
+        ],
+    },
+    {
+        "name": "step carico · generatore  (0 → 100% → 0)",
+        "ensure": {"motor_mode": False},
+        "stages": [
+            {"dur": 3.0, "throttle": 0.0,  "desc": "no load"},
+            {"dur": 5.0, "throttle": 0.25, "desc": "25% gen"},
+            {"dur": 5.0, "throttle": 0.50, "desc": "50% gen"},
+            {"dur": 5.0, "throttle": 0.75, "desc": "75% gen"},
+            {"dur": 5.0, "throttle": 1.00, "desc": "100% gen"},
+            {"dur": 7.0, "throttle": 0.0,  "desc": "back to no load"},
+        ],
+    },
+    {
+        "name": "sweep tan(φ_s*)  (capacitivo ↔ induttivo)",
+        "stages": [
+            {"dur":  5.0, "tan_phi": 0.0,  "desc": "PF unitario (start)"},
+            {"dur": 15.0, "tan_phi_ramp": (0.0,  0.5), "desc": "rampa → induttivo"},
+            {"dur":  5.0, "tan_phi": 0.5,  "desc": "induttivo (hold)"},
+            {"dur": 15.0, "tan_phi_ramp": (0.5, -0.5), "desc": "rampa → capacitivo"},
+            {"dur":  5.0, "tan_phi": -0.5, "desc": "capacitivo (hold)"},
+            {"dur": 15.0, "tan_phi_ramp": (-0.5, 0.0), "desc": "ritorno a PF unitario"},
+        ],
+    },
+]
 from dfig_gamepad import GamepadController
 
 # ============================================================
@@ -914,6 +988,15 @@ class DfigWindow(QtWidgets.QMainWindow):
         # the kernel and no UI warning is displayed.
         self._sat_enabled = False
 
+        # Autopilot state: when active, a 10 Hz QTimer drives setpoints
+        # programmatically through the existing sliders (visible motion,
+        # callbacks fire as if the user moved them by hand).
+        self._auto_active = False
+        self._auto_t0 = 0.0
+        self._auto_timer = QtCore.QTimer(self)
+        self._auto_timer.setInterval(100)
+        self._auto_timer.timeout.connect(self._autopilot_tick)
+
         # Stick engagement state — for "trim + perturbation" semantics:
         # when a stick exits the deadzone we capture the slider's current
         # value as the home; while engaged the stick drives the slider
@@ -1380,6 +1463,55 @@ class DfigWindow(QtWidgets.QMainWindow):
                                       comp_inner_w, expanded=True)
         v.addWidget(center_widget(composer, 1400))
 
+        # ---- Autopilot panel ----
+        auto_inner = QtWidgets.QWidget()
+        auto_v = QtWidgets.QVBoxLayout(auto_inner)
+        auto_v.setContentsMargins(6, 6, 6, 6); auto_v.setSpacing(4)
+
+        auto_row1 = QtWidgets.QHBoxLayout(); auto_row1.setSpacing(8)
+        sl_lbl = QtWidgets.QLabel()
+        sl_lbl.setText(htm("scenario:", color="#94a3b8"))
+        sl_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self._auto_scenario = QtWidgets.QComboBox()
+        for s in AUTOPILOT_SCENARIOS:
+            self._auto_scenario.addItem(s["name"])
+        self._auto_loop = QtWidgets.QCheckBox("loop")
+        self._auto_loop.setChecked(True)
+        auto_row1.addWidget(sl_lbl)
+        auto_row1.addWidget(self._auto_scenario, 1)
+        auto_row1.addWidget(self._auto_loop)
+        auto_v.addLayout(auto_row1)
+
+        auto_row2 = QtWidgets.QHBoxLayout(); auto_row2.setSpacing(8)
+        self._auto_btn = QtWidgets.QPushButton("▶ START")
+        self._auto_btn.setCheckable(True)
+        self._auto_btn.setMinimumHeight(26)
+        self._auto_btn.toggled.connect(self._on_autopilot_toggle)
+        self._auto_status = QtWidgets.QLabel()
+        self._auto_status.setText(htm("idle", color="#475569"))
+        self._auto_status.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        auto_row2.addWidget(self._auto_btn)
+        auto_row2.addWidget(self._auto_status, 1)
+        auto_v.addLayout(auto_row2)
+
+        self._auto_progress = QtWidgets.QProgressBar()
+        self._auto_progress.setRange(0, 1000)
+        self._auto_progress.setValue(0)
+        self._auto_progress.setTextVisible(True)
+        self._auto_progress.setFormat("%p ‰")
+        self._auto_progress.setFixedHeight(14)
+        auto_v.addWidget(self._auto_progress)
+
+        self._auto_phase = QtWidgets.QLabel()
+        self._auto_phase.setText(htm("—", color="#475569", size="x-small"))
+        self._auto_phase.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        auto_v.addWidget(self._auto_phase)
+
+        autopilot_section = CollapsibleSection(
+            "AUTOPILOT · VC mode (esplorazione casi)",
+            auto_inner, expanded=True)
+        v.addWidget(center_widget(autopilot_section, 720))
+
         # ---- Footer ----
         ft_row = QtWidgets.QHBoxLayout()
         ft_row.setSpacing(12)
@@ -1499,6 +1631,83 @@ class DfigWindow(QtWidgets.QMainWindow):
         for d in self._plot_drawing_areas:
             d.update()
         self._da_curr.update(); self._da_flux.update()
+
+    # ---- Autopilot ----
+    def _on_autopilot_toggle(self, checked):
+        if checked:
+            scenario = AUTOPILOT_SCENARIOS[self._auto_scenario.currentIndex()]
+            # Force VC mode (autopilot is wired against VC setpoints only)
+            if not self._rb_vc.isChecked():
+                self._rb_vc.setChecked(True)
+            # Apply ensure constraints (e.g. force generator mode for load test)
+            ensure = scenario.get("ensure", {})
+            if "motor_mode" in ensure and ensure["motor_mode"] != self._motor_mode:
+                self._on_load_mode_click()
+            self._auto_active = True
+            self._auto_t0 = time.perf_counter()
+            self._auto_btn.setText("■ STOP")
+            self._auto_timer.start()
+            self._auto_status.setText(htm("running …", color="#22c55e", bold=True))
+        else:
+            self._auto_active = False
+            self._auto_timer.stop()
+            self._auto_btn.setText("▶ START")
+            self._auto_progress.setValue(0)
+            self._auto_phase.setText(htm("—", color="#475569", size="x-small"))
+            self._auto_status.setText(htm("idle", color="#475569"))
+
+    def _autopilot_tick(self):
+        if not self._auto_active:
+            return
+        scenario = AUTOPILOT_SCENARIOS[self._auto_scenario.currentIndex()]
+        stages = scenario["stages"]
+        total_dur = sum(s["dur"] for s in stages)
+        if total_dur <= 0:
+            return
+
+        elapsed = time.perf_counter() - self._auto_t0
+        if elapsed >= total_dur:
+            if self._auto_loop.isChecked():
+                self._auto_t0 = time.perf_counter()
+                elapsed = 0.0
+            else:
+                # End of one-shot run — flip the toggle off, which restores idle UI
+                self._auto_btn.setChecked(False)
+                return
+
+        # Locate the current stage
+        t_acc = 0.0
+        cur = stages[0]
+        t_in_stage = elapsed
+        for st in stages:
+            if elapsed < t_acc + st["dur"]:
+                cur = st
+                t_in_stage = elapsed - t_acc
+                break
+            t_acc += st["dur"]
+
+        # Apply the stage's setpoints. Each branch writes onto the corresponding
+        # slider via setValue, which fires the slider's callback → engine.set_ctrl,
+        # so the UI stays visually in sync with what the engine sees.
+        if "wm_factor" in cur:
+            sync_giri = self._fs_value / max(self._np_value, 1e-9)
+            self._sl_vc_wmref.setValue(cur["wm_factor"] * sync_giri)
+        if "tan_phi" in cur:
+            self._sl_vc_tanphi.setValue(cur["tan_phi"])
+        if "tan_phi_ramp" in cur:
+            a, b = cur["tan_phi_ramp"]
+            alpha = min(1.0, t_in_stage / cur["dur"]) if cur["dur"] > 0 else 1.0
+            self._sl_vc_tanphi.setValue(a + (b - a) * alpha)
+        if "throttle" in cur:
+            self._throttle = cur["throttle"]
+            self._update_load()
+
+        # UI feedback
+        permil = int(round(elapsed / total_dur * 1000))
+        self._auto_progress.setValue(permil)
+        self._auto_phase.setText(htm(
+            f"fase: {cur.get('desc', '')}  ·  t = {elapsed:5.1f} / {total_dur:.1f} s",
+            color="#22c55e", size="x-small"))
 
     # ---- Magnetic saturation toggle ----
     def _on_sat_toggle(self, checked):
