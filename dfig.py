@@ -49,11 +49,19 @@ H_T, H_WM, H_CE, H_PS, H_QS, H_PR, H_SLIP = 0, 1, 2, 3, 4, 5, 6
 H_ISD, H_ISQ, H_IRD, H_IRQ = 7, 8, 9, 10
 H_PSD, H_PSQ, H_PRD, H_PRQ = 11, 12, 13, 14
 H_QR, H_PRS, H_PRR = 15, 16, 17
-NH = 18
+# Bilancio potenze (kW, segno = direzione del flusso):
+#   Pmech = -Cl·ωm     (input meccanico, >0 se l'albero spinge la macchina)
+#   Pem   =  Ce·ωm     (potenza meccanica em prodotta lato motore)
+#   Pfric =  b·ωm²     (perdite per attrito, sempre ≥0)
+#   Ploss =  P_Rs + P_Rr + Pfric (perdite totali, sempre ≥0)
+#   dKEdt =  J·ωm·(dωm/dt) (derivata energia cinetica)
+H_PMECH, H_PEM, H_PFRIC, H_PLOSS, H_DKEDT = 18, 19, 20, 21, 22
+NH = 23
 HIST_FIELDS = ["t", "wm", "Ce", "Ps", "Qs", "Pr", "slip",
                "isd", "isq", "ird", "irq",
                "psd", "psq", "prd", "prq",
-               "Qr", "PRs", "PRr"]
+               "Qr", "PRs", "PRr",
+               "Pmech", "Pem", "Pfric", "Ploss", "dKEdt"]
 
 # Catalogo segnali plottabili (chiave hist · nome leggibile · unità · RGB)
 SIGNALS_LIST = [
@@ -74,6 +82,12 @@ SIGNALS_LIST = [
     ("psq",  "φ_sq", "mWb",   0.20, 0.65, 0.40),
     ("prd",  "φ_rd", "mWb",   1.00, 0.50, 0.85),
     ("prq",  "φ_rq", "mWb",   0.85, 0.30, 0.65),
+    # Bilancio energetico
+    ("Pmech", "P_mecc",  "kW", 0.30, 0.85, 0.50),
+    ("Pem",   "P_em",    "kW", 0.95, 0.60, 0.30),
+    ("Pfric", "P_fric",  "kW", 0.65, 0.55, 0.40),
+    ("Ploss", "P_loss",  "kW", 0.55, 0.45, 0.35),
+    ("dKEdt", "dKE/dt",  "kW", 0.75, 0.85, 0.30),
 ]
 SIG_BY_KEY = {k: dict(name=n, unit=u, r=r, g=g, b=b)
               for k, n, u, r, g, b in SIGNALS_LIST}
@@ -105,9 +119,13 @@ INT_EULER, INT_RK4, INT_RK45 = 0, 1, 2
 #   CTRL[10] = I_id                  I del PI sulla i_r,d
 #   CTRL[11] = P_iq                  P del PI sulla i_r,q
 #   CTRL[12] = I_iq                  I del PI sulla i_r,q
-NCTRL = 13
+#   CTRL[13] = tan(φ_s*)             target di Q_s/P_s lato statore
+#                                    0 = PF unitario (sottocaso), >0 induttivo,
+#                                    <0 capacitivo
+NCTRL = 14
 C_MODE, C_PSREF, C_QSREF, C_HP, C_HQ, C_VDC = 0, 1, 2, 3, 4, 5
 C_WMREF, C_PW, C_IW, C_PID, C_IID, C_PIQ, C_IIQ = 6, 7, 8, 9, 10, 11, 12
+C_TANPHI = 13
 MODE_OPEN, MODE_DPC, MODE_VC = 0.0, 1.0, 2.0
 CTRL_DEFAULT = np.array([
     MODE_OPEN,
@@ -116,6 +134,7 @@ CTRL_DEFAULT = np.array([
     1.0e4, 1.0e5,                             # P_w, I_w  (errore fraz.)
     0.1, 1.0,                                 # P_id, I_id
     1.0, 10.0,                                # P_iq, I_iq
+    0.0,                                      # tan(φ_s*) = 0  → PF=1
 ], dtype=np.float64)
 
 # === Stato del controllore (3 integratori PI + tempo ultimo campione) ===
@@ -176,8 +195,12 @@ def _compute_vc(s, Vs, ws, params, ctrl, ctrl_state, out_v):
     if ird_ref > IRD_MAX: ird_ref = IRD_MAX
     if ird_ref < -IRD_MAX: ird_ref = -IRD_MAX
 
-    # === Riferimento i_r,q* costante per Q_s = 0 ===
-    irq_ref = -Vs / (M_ * ws_safe)
+    # === Riferimento i_r,q* per fattore di potenza generico ===
+    # Q_s = V²/(Ls·ωs) + V·M/Ls·i_r,q  e  P_s = -V·M/Ls·i_r,d
+    # Voglio Q_s = tan(φ*)·P_s  ⇒  i_r,q* = -V/(M·ωs) - tan(φ*)·i_r,d
+    # tan(φ*)=0 → PF=1 (sottocaso). >0 induttivo (Q assorbito), <0 capacitivo.
+    tan_phi = ctrl[13]
+    irq_ref = -Vs / (M_ * ws_safe) - tan_phi * ird
 
     # === Anelli interni di corrente ===
     P_id = ctrl[9]; I_id = ctrl[10]
@@ -277,10 +300,10 @@ def deriv(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, out):
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def observe(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params, out):
+def observe(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, out):
     Rs = params[0]; Rr = params[1]
     Ls = params[2]; Lr = params[3]; M_ = params[4]
-    NP = params[5]
+    NP = params[5]; J = params[6]; B = params[7]
     D = Ls * Lr - M_ * M_
     psd = s[0]; psq = s[1]; prd = s[2]; prq = s[3]
     wm = s[4]; thm = s[5]; t = s[6]
@@ -301,6 +324,13 @@ def observe(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params, out):
     PRs = Rs * (isd * isd + isq * isq)
     PRr = Rr * (ird * ird + irq * irq)
     slip = (ws - NP * wm) / ws * 100.0 if ws > 0 else 0.0
+    # Bilancio energetico (W → kW per coerenza con P_s, P_r, P_loss)
+    Pmech = -Cl * wm                       # ingresso meccanico (>0 se l'albero spinge)
+    Pem   = Ce * wm                        # potenza em prodotta lato meccanico
+    Pfric = B * wm * wm                    # perdite per attrito viscoso
+    Ploss = PRs + PRr + Pfric              # perdite totali
+    # dKE/dt = J·ω·dω/dt = ω·(Ce - B·ω - Cl)  (regime: ≈ 0)
+    dKEdt = wm * (Ce - B * wm - Cl)
     out[0] = t
     out[1] = wm / (2.0 * math.pi)
     out[2] = Ce / 1e3
@@ -319,13 +349,18 @@ def observe(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params, out):
     out[15] = Qr / 1e3
     out[16] = PRs / 1e3
     out[17] = PRr / 1e3
+    out[18] = Pmech / 1e3
+    out[19] = Pem   / 1e3
+    out[20] = Pfric / 1e3
+    out[21] = Ploss / 1e3
+    out[22] = dKEdt / 1e3
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def _maybe_sample(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params,
+def _maybe_sample(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params,
                   last_log_t, samples, n_samples, max_samples, obs):
     if s[6] - last_log_t >= LOG_INTERVAL and n_samples < max_samples:
-        observe(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params, obs)
+        observe(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, obs)
         for j in range(NH):
             samples[n_samples, j] = obs[j]
         n_samples += 1
@@ -368,7 +403,7 @@ def advance_euler(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl, ctrl_state,
             s[i] += dt * k[i]
         n_steps += 1
         n_samples, last_log_t = _maybe_sample(
-            s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params,
+            s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params,
             last_log_t, samples, n_samples, max_samples, obs)
     return n_steps, n_samples, last_log_t
 
@@ -398,7 +433,7 @@ def advance_rk4(s, t_target, Vs, ws, Vr, wr, Cl, dt, params, ctrl, ctrl_state,
             s[i] += h6 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i])
         n_steps += 1
         n_samples, last_log_t = _maybe_sample(
-            s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params,
+            s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params,
             last_log_t, samples, n_samples, max_samples, obs)
     return n_steps, n_samples, last_log_t
 
@@ -493,7 +528,7 @@ def advance_rk45(s, t_target, Vs, ws, Vr, wr, Cl,
             if dt > dt_max: dt = dt_max
             if dt < dt_min: dt = dt_min
             n_samples, last_log_t = _maybe_sample(
-                s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, params,
+                s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params,
                 last_log_t, samples, n_samples, max_samples, obs)
             # Step accettato → ricampiona controllo per il prossimo passo
             if use_held > 0.5:
@@ -567,6 +602,7 @@ class SimEngine:
             "P_w": 1.0e4, "I_w": 1.0e5,            # PI velocità (errore fraz.)
             "P_id": 0.1, "I_id": 1.0,               # PI i_r,d
             "P_iq": 1.0, "I_iq": 10.0,              # PI i_r,q
+            "tan_phi": 0.0,                          # Q_s/P_s target (0=PF unitario)
         }
         # Stato persistente del controllore (3 integratori PI + tempo ultimo sample)
         self.ctrl_state = np.zeros(NCS)
@@ -743,6 +779,7 @@ class SimEngine:
                 P_w = self.ctrl.get("P_w", 1e4); I_w = self.ctrl.get("I_w", 1e5)
                 P_id = self.ctrl.get("P_id", 0.1); I_id = self.ctrl.get("I_id", 1.0)
                 P_iq = self.ctrl.get("P_iq", 1.0); I_iq = self.ctrl.get("I_iq", 10.0)
+                tan_phi = self.ctrl.get("tan_phi", 0.0)
                 state_local = self.state.copy()
                 params_local = self.params.copy()
                 ctrl_state_local = self.ctrl_state.copy()
@@ -760,6 +797,7 @@ class SimEngine:
                 mode_code,
                 Ps_ref, Qs_ref, h_P, h_Q, Vdc_dpc,
                 wm_ref, P_w, I_w, P_id, I_id, P_iq, I_iq,
+                tan_phi,
             ], dtype=np.float64)
 
             now = time.perf_counter()
@@ -1021,12 +1059,15 @@ def draw_dq(area, cr, w, h, snap, traces, t_win, title):
 
 
 def draw_tplot(area, cr, w, h, snap, signal_keys, t_win, title,
-               plot_idx, y_persist, cursor_state):
+               plot_idx, y_persist, cursor_state, stacked=False):
     """Plot tempo-serie con:
        - asse Y isteretico (si allarga, mai si stringe finché non si reset)
        - tick + grid sottile su entrambi gli assi
        - cursore verticale cross-plot + tooltip valori
        - tracce dinamiche dal catalogo SIG_BY_KEY
+       - modo stacked: aree riempite cumulative con segno preservato
+         (positivi sopra zero, negativi sotto). Per visualizzare bilanci
+         di potenza dove la conservazione richiede ΣP = 0.
     """
     # Margini area di plot
     M_L, M_R, M_T, M_B = 60, 10, 28, 22
@@ -1065,20 +1106,38 @@ def draw_tplot(area, cr, w, h, snap, signal_keys, t_win, title,
     stride = max(1, n_visible // plot_w)
 
     # Range dati nella finestra visibile (vettorializzato)
-    mn_d, mx_d = float("inf"), float("-inf")
-    for key in signal_keys:
-        if key not in SIG_BY_KEY: continue
-        a = getattr(snap, key, None)
-        if a is None: continue
-        sub = a[i0::stride]
-        if sub.size:
-            v_mn = float(sub.min()); v_mx = float(sub.max())
-            if v_mn < mn_d: mn_d = v_mn
-            if v_mx > mx_d: mx_d = v_mx
-    if mn_d == float("inf"):
-        return
-    if mn_d == mx_d:
-        mn_d -= 1; mx_d += 1
+    if stacked:
+        # In modo stacked: il range va dalla cum-neg (più bassa) alla cum-pos
+        # (più alta) sommando ogni traccia con segno preservato.
+        n_t = max(1, (len(t_arr) - i0 + stride - 1) // stride)
+        cum_pos = np.zeros(n_t); cum_neg = np.zeros(n_t)
+        for key in signal_keys:
+            if key not in SIG_BY_KEY: continue
+            a = getattr(snap, key, None)
+            if a is None: continue
+            a_sub = a[i0::stride]
+            if a_sub.size != n_t: continue
+            cum_pos = np.where(a_sub >= 0, cum_pos + a_sub, cum_pos)
+            cum_neg = np.where(a_sub <  0, cum_neg + a_sub, cum_neg)
+        mn_d = float(cum_neg.min()) if cum_neg.size else 0.0
+        mx_d = float(cum_pos.max()) if cum_pos.size else 0.0
+        if mn_d == 0.0 and mx_d == 0.0:
+            mn_d = -1.0; mx_d = 1.0
+    else:
+        mn_d, mx_d = float("inf"), float("-inf")
+        for key in signal_keys:
+            if key not in SIG_BY_KEY: continue
+            a = getattr(snap, key, None)
+            if a is None: continue
+            sub = a[i0::stride]
+            if sub.size:
+                v_mn = float(sub.min()); v_mx = float(sub.max())
+                if v_mn < mn_d: mn_d = v_mn
+                if v_mx > mx_d: mx_d = v_mx
+        if mn_d == float("inf"):
+            return
+        if mn_d == mx_d:
+            mn_d -= 1; mx_d += 1
 
     # ASSE Y ISTERETICO: si allarga, mai si stringe
     persist = y_persist.get(plot_idx)
@@ -1130,20 +1189,57 @@ def draw_tplot(area, cr, w, h, snap, signal_keys, t_win, title,
     t_sub = t_arr[i0::stride]
     xs_arr = M_L + (t_sub - ts) / t_win * plot_w
     sig_legend = []
-    for key in signal_keys:
-        if key not in SIG_BY_KEY: continue
-        meta = SIG_BY_KEY[key]
-        a = getattr(snap, key, None)
-        if a is None: continue
-        a_sub = a[i0::stride]
-        if a_sub.size < 2: continue
-        ys_arr = M_T + plot_h - (a_sub - mn) / (mx - mn) * plot_h
-        cr.set_source_rgb(meta["r"], meta["g"], meta["b"]); cr.set_line_width(1.8)
-        cr.move_to(float(xs_arr[0]), float(ys_arr[0]))
-        for k in range(1, len(xs_arr)):
-            cr.line_to(float(xs_arr[k]), float(ys_arr[k]))
-        cr.stroke()
-        sig_legend.append((key, meta))
+    if stacked:
+        # Stacked diverging: ogni traccia è una banda sopra/sotto il
+        # cumulativo precedente in base al segno. La somma di tutte le
+        # bande positive = -somma delle negative (conservazione).
+        n_t = len(t_sub)
+        cp = np.zeros(n_t); cn = np.zeros(n_t)
+        for key in signal_keys:
+            if key not in SIG_BY_KEY: continue
+            meta = SIG_BY_KEY[key]
+            a = getattr(snap, key, None)
+            if a is None: continue
+            a_sub = a[i0::stride]
+            if a_sub.size != n_t: continue
+            new_cp = np.where(a_sub >= 0, cp + a_sub, cp)
+            new_cn = np.where(a_sub <  0, cn + a_sub, cn)
+            upper = np.where(a_sub >= 0, new_cp, cn)
+            lower = np.where(a_sub >= 0, cp,     new_cn)
+            cp, cn = new_cp, new_cn
+            ys_up = M_T + plot_h - (upper - mn) / (mx - mn) * plot_h
+            ys_lo = M_T + plot_h - (lower - mn) / (mx - mn) * plot_h
+            # Riempimento area
+            cr.set_source_rgba(meta["r"], meta["g"], meta["b"], 0.55)
+            cr.move_to(float(xs_arr[0]), float(ys_lo[0]))
+            for k in range(n_t):
+                cr.line_to(float(xs_arr[k]), float(ys_up[k]))
+            for k in range(n_t - 1, -1, -1):
+                cr.line_to(float(xs_arr[k]), float(ys_lo[k]))
+            cr.close_path()
+            cr.fill_preserve()
+            # Bordo sottile
+            cr.set_source_rgb(meta["r"], meta["g"], meta["b"]); cr.set_line_width(0.8)
+            cr.stroke()
+            sig_legend.append((key, meta))
+        # Somma totale (linea bianca tratteggiata): mostra il residuo della
+        # conservazione (in regime ≈ 0, in transitorio = dKE/dt netto).
+        # Evidenzia visivamente quando il bilancio energetico chiude.
+    else:
+        for key in signal_keys:
+            if key not in SIG_BY_KEY: continue
+            meta = SIG_BY_KEY[key]
+            a = getattr(snap, key, None)
+            if a is None: continue
+            a_sub = a[i0::stride]
+            if a_sub.size < 2: continue
+            ys_arr = M_T + plot_h - (a_sub - mn) / (mx - mn) * plot_h
+            cr.set_source_rgb(meta["r"], meta["g"], meta["b"]); cr.set_line_width(1.8)
+            cr.move_to(float(xs_arr[0]), float(ys_arr[0]))
+            for k in range(1, len(xs_arr)):
+                cr.line_to(float(xs_arr[k]), float(ys_arr[k]))
+            cr.stroke()
+            sig_legend.append((key, meta))
 
     # === Tick label asse Y (sx) ===
     cr.set_source_rgb(0.55, 0.62, 0.72); cr.set_font_size(11)
@@ -1465,11 +1561,27 @@ def run():
         dpc_box.append(dpc_vdc);   dpc_box.append(dpc_hp); dpc_box.append(dpc_hq)
         dpc_box.set_visible(False)
 
-        # Sliders VC: riferimento velocità + guadagni dei 3 PI + reiettori
+        # Sliders VC: riferimento velocità + target PF + guadagni PI
         vc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         wm_sync_giri = (2*math.pi*50.0/3.0) / (2*math.pi)  # ≈ 16.67 giri/s a 50 Hz, 3pp
         vc_wmref = make_slider("ω̃_m [giri/s]", wm_sync_giri, 0, 30, 0.1,
                                lambda v: engine.set_ctrl(wm_ref=v * 2*math.pi))
+
+        # Slider tan(φ_s*): 0 = PF unitario, >0 = induttivo, <0 = capacitivo.
+        # Label dinamico mostra cosφ corrispondente.
+        vc_pf_lbl = Gtk.Label(); vc_pf_lbl.set_halign(Gtk.Align.START)
+        def update_pf_lbl(tan_phi):
+            cos_phi = 1.0 / math.sqrt(1.0 + tan_phi*tan_phi)
+            sign = "ind" if tan_phi > 0.001 else ("cap" if tan_phi < -0.001 else "—")
+            vc_pf_lbl.set_markup(
+                f'<span font_family="monospace" foreground="#78716c" size="x-small">'
+                f'cos(φ_s) = {cos_phi:.3f}  ({sign})</span>')
+        update_pf_lbl(0.0)
+        def on_pf_change(v):
+            engine.set_ctrl(tan_phi=v)
+            update_pf_lbl(v)
+        vc_pf = make_slider("tan(φ_s*)  [Q_s/P_s]", 0.0, -1.0, 1.0, 0.05, on_pf_change)
+
         vc_pw = make_slider("P_w (vel.)", 1e4, 0, 5e4, 100,
                             lambda v: engine.set_ctrl(P_w=v))
         vc_iw = make_slider("I_w (vel.)", 1e5, 0, 5e5, 1000,
@@ -1483,6 +1595,7 @@ def run():
         vc_iiq = make_slider("I_i_q", 10.0, 0, 200, 1,
                              lambda v: engine.set_ctrl(I_iq=v))
         vc_box.append(vc_wmref)
+        vc_box.append(vc_pf); vc_box.append(vc_pf_lbl)
         vc_box.append(vc_pw); vc_box.append(vc_iw)
         vc_box.append(vc_pid); vc_box.append(vc_iid)
         vc_box.append(vc_piq); vc_box.append(vc_iiq)
@@ -1651,13 +1764,15 @@ def run():
             [],
             [],
         ]
+        plot_stacked = [False] * plot_count
         plot_titles = [f"Plot {j+1}" for j in range(plot_count)]
         y_persist = {}
         cursor_state = {"x": None}
         plot_drawing_areas = []
 
         # Suddivisione del catalogo in due gruppi
-        SCALAR_KEYS = ["wm", "Ce", "Ps", "Qs", "Pr", "Qr", "PRs", "PRr", "slip"]
+        SCALAR_KEYS = ["wm", "Ce", "Ps", "Qs", "Pr", "Qr", "PRs", "PRr", "slip",
+                       "Pmech", "Pem", "Pfric", "Ploss", "dKEdt"]
         DQ_KEYS     = ["isd", "isq", "ird", "irq", "psd", "psq", "prd", "prq"]
 
         comp_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -1736,6 +1851,26 @@ def run():
         comp_inner.append(build_signal_grid(SCALAR_KEYS))
         comp_inner.append(build_signal_grid(DQ_KEYS))
 
+        # Riga di toggle "stacked" — uno per plot.  Se attivo, il plot disegna
+        # le tracce come aree sovrapposte (positive sopra zero, negative sotto)
+        # per visualizzare il bilancio di potenze.
+        stack_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        stack_row.set_halign(Gtk.Align.CENTER)
+        sl_lbl = Gtk.Label()
+        sl_lbl.set_markup('<span font_family="monospace" foreground="#94a3b8" size="x-small">visualizz. stacked Σ</span>')
+        stack_row.append(sl_lbl)
+        for j in range(plot_count):
+            cb_stk = Gtk.CheckButton(label=f"P{j+1}")
+            def make_stk_handler(idx):
+                def on_stk(btn):
+                    plot_stacked[idx] = btn.get_active()
+                    y_persist.pop(idx, None)
+                    for d in plot_drawing_areas:
+                        d.queue_draw()
+                return on_stk
+            cb_stk.connect("toggled", make_stk_handler(j))
+            stack_row.append(cb_stk)
+
         # Terza colonna: moduli e derivati (a fianco, non sotto)
         mod_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         mod_col.set_margin_start(4)
@@ -1770,6 +1905,7 @@ def run():
 
         update_plot_titles()
         comp_box.append(comp_inner)
+        comp_box.append(stack_row)
         dq_row.append(comp_box)
 
         vbox.append(dq_row)
@@ -1796,7 +1932,7 @@ def run():
             return lambda a, cr, w, h, *_: draw_tplot(
                 a, cr, w, h, render_state["snap"],
                 plot_signals[j], twin[0], plot_titles[j],
-                j, y_persist, cursor_state)
+                j, y_persist, cursor_state, stacked=plot_stacked[j])
 
         def make_motion_handler(da):
             def on_motion(_ctrl, x, _y):
@@ -1937,6 +2073,13 @@ def run():
             PRs = Rs_p*(isd*isd + isq*isq)
             PRr = Rr_p*(ird*ird + irq*irq)
             slip = (ws_now - NP_p*wm_now)/ws_now*100 if ws_now > 0 else 0.0
+            # Bilancio energetico (kW)
+            Cl_now = ctrl.get("Cl", 0.0); J_p = prm[6]; B_p = prm[7]
+            Pmech = -Cl_now * wm_now
+            Pem   = Ce * wm_now
+            Pfric = B_p * wm_now * wm_now
+            Ploss = PRs + PRr + Pfric
+            dKEdt = wm_now * (Ce - B_p*wm_now - Cl_now)
 
             # Valori per ogni segnale del catalogo (chiave hist → valore istantaneo)
             sig_values = {
@@ -1953,6 +2096,11 @@ def run():
                 "ird":  ird, "irq":  irq,
                 "psd":  psd * 1e3, "psq": psq * 1e3,
                 "prd":  prd * 1e3, "prq": prq * 1e3,
+                "Pmech": Pmech / 1e3,
+                "Pem":   Pem   / 1e3,
+                "Pfric": Pfric / 1e3,
+                "Ploss": Ploss / 1e3,
+                "dKEdt": dKEdt / 1e3,
             }
             for k, vl in value_labels.items():
                 v = sig_values.get(k, 0.0)
