@@ -1139,12 +1139,18 @@ class DfigWindow(QtWidgets.QMainWindow):
                                     compact=True)
         dpc_v.addWidget(self._sl_dpc_psref)
         dpc_v.addWidget(self._sl_dpc_qsref)
-        dpc_v.addWidget(Slider("V_dc rotore [V]", 100, 10, 500, 5,
-                               lambda x: self.engine.set_ctrl(Vdc_dpc=x), compact=True))
-        dpc_v.addWidget(Slider("banda h_P [kW]", 0.5, 0.05, 20, 0.05,
-                               lambda x: self.engine.set_ctrl(h_P=x * 1e3), compact=True))
-        dpc_v.addWidget(Slider("banda h_Q [kVAR]", 0.5, 0.05, 20, 0.05,
-                               lambda x: self.engine.set_ctrl(h_Q=x * 1e3), compact=True))
+        self._sl_dpc_vdc = Slider("V_dc rotore [V]", 100, 10, 500, 5,
+                                  lambda x: self.engine.set_ctrl(Vdc_dpc=x),
+                                  compact=True)
+        self._sl_dpc_hp = Slider("banda h_P [kW]", 0.5, 0.05, 20, 0.05,
+                                 lambda x: self.engine.set_ctrl(h_P=x * 1e3),
+                                 compact=True)
+        self._sl_dpc_hq = Slider("banda h_Q [kVAR]", 0.5, 0.05, 20, 0.05,
+                                 lambda x: self.engine.set_ctrl(h_Q=x * 1e3),
+                                 compact=True)
+        dpc_v.addWidget(self._sl_dpc_vdc)
+        dpc_v.addWidget(self._sl_dpc_hp)
+        dpc_v.addWidget(self._sl_dpc_hq)
         self._dpc_box.setVisible(False)
 
         # VC sliders
@@ -1172,18 +1178,22 @@ class DfigWindow(QtWidgets.QMainWindow):
                                     on_pf_change, compact=True)
         vc_v.addWidget(self._sl_vc_tanphi)
         vc_v.addWidget(self._vc_pf_lbl)
-        vc_v.addWidget(Slider("P_w (vel.)", 1e4, 0, 5e4, 100,
-                              lambda x: self.engine.set_ctrl(P_w=x), compact=True))
-        vc_v.addWidget(Slider("I_w (vel.)", 1e5, 0, 5e5, 1000,
-                              lambda x: self.engine.set_ctrl(I_w=x), compact=True))
-        vc_v.addWidget(Slider("P_i_d", 0.1, 0, 5, 0.05,
-                              lambda x: self.engine.set_ctrl(P_id=x), compact=True))
-        vc_v.addWidget(Slider("I_i_d", 1.0, 0, 50, 0.1,
-                              lambda x: self.engine.set_ctrl(I_id=x), compact=True))
-        vc_v.addWidget(Slider("P_i_q", 1.0, 0, 50, 0.1,
-                              lambda x: self.engine.set_ctrl(P_iq=x), compact=True))
-        vc_v.addWidget(Slider("I_i_q", 10.0, 0, 200, 1,
-                              lambda x: self.engine.set_ctrl(I_iq=x), compact=True))
+        self._sl_vc_pw = Slider("P_w (vel.)", 1e4, 0, 5e4, 100,
+                                lambda x: self.engine.set_ctrl(P_w=x), compact=True)
+        self._sl_vc_iw = Slider("I_w (vel.)", 1e5, 0, 5e5, 1000,
+                                lambda x: self.engine.set_ctrl(I_w=x), compact=True)
+        self._sl_vc_pid = Slider("P_i_d", 0.1, 0, 5, 0.05,
+                                 lambda x: self.engine.set_ctrl(P_id=x), compact=True)
+        self._sl_vc_iid = Slider("I_i_d", 1.0, 0, 50, 0.1,
+                                 lambda x: self.engine.set_ctrl(I_id=x), compact=True)
+        self._sl_vc_piq = Slider("P_i_q", 1.0, 0, 50, 0.1,
+                                 lambda x: self.engine.set_ctrl(P_iq=x), compact=True)
+        self._sl_vc_iiq = Slider("I_i_q", 10.0, 0, 200, 1,
+                                 lambda x: self.engine.set_ctrl(I_iq=x), compact=True)
+        for w in (self._sl_vc_pw, self._sl_vc_iw,
+                  self._sl_vc_pid, self._sl_vc_iid,
+                  self._sl_vc_piq, self._sl_vc_iiq):
+            vc_v.addWidget(w)
         self._vc_box.setVisible(False)
 
         cbox.addWidget(panel("ROTORE", "#ef4444",
@@ -1625,7 +1635,54 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._run_btn.setText("■ STOP" if running else "▶ RUN")
 
     def _on_reset(self):
+        # 1. Stop autopilot if running, otherwise it would immediately
+        #    overwrite the slider values we're about to restore.
+        if self._auto_active:
+            self._auto_btn.setChecked(False)
+
+        # 2. Reset every control slider (preset-independent ones) to its
+        #    "neutral" startup default. Slider.setValue propagates via the
+        #    callback → engine.set_ctrl, so the engine sees the new values.
+        # Open-loop
+        self._ol_vr.setValue(0)
+        self._ol_fr.setValue(0)
+        # DPC
+        self._sl_dpc_psref.setValue(0)
+        self._sl_dpc_qsref.setValue(0)
+        self._sl_dpc_vdc.setValue(100)
+        self._sl_dpc_hp.setValue(0.5)
+        self._sl_dpc_hq.setValue(0.5)
+        # VC
+        self._sl_vc_tanphi.setValue(0)
+        self._sl_vc_pw.setValue(1e4)
+        self._sl_vc_iw.setValue(1e5)
+        self._sl_vc_pid.setValue(0.1)
+        self._sl_vc_iid.setValue(1.0)
+        self._sl_vc_piq.setValue(1.0)
+        self._sl_vc_iiq.setValue(10.0)
+        # Time-window + speed factor (view properties)
+        self._tw_slider.setValue(10)
+        self._speed_slider.setValue(0.0)  # log10(1) → 1.00× wall
+
+        # 3. Macro state: control mode, load mode, throttle, saturation toggle.
+        self._throttle = 0.0
+        if self._motor_mode:
+            self._on_load_mode_click()  # back to generator (default startup)
+        if not self._rb_vc.isChecked():
+            self._rb_vc.setChecked(True)  # back to VC mode
+        if self._sat_btn.isChecked():
+            self._sat_btn.setChecked(False)  # saturation OFF (warning mode)
+
+        # 4. Re-apply the currently selected preset. This restores machine
+        #    parameters, V_n / f_s nominals, ω̃_m_sync default and snap, ψ_s,sat
+        #    default, and the C_load fondoscala range.
+        self._on_preset_changed(self._preset_combo.currentIndex())
+
+        # 5. Engine state reset (zeros integrators, history, anchors).
         self.engine.reset()
+
+        # 6. Plot UI: clear the hysteretic Y bounds and the cross-plot cursor,
+        #    then force a repaint so the new "fresh" state is visible.
         self._y_persist.clear()
         self._cursor_state["x"] = None
         for d in self._plot_drawing_areas:
