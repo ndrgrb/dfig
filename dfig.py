@@ -1715,7 +1715,7 @@ def run():
                 vl = Gtk.Label(); vl.set_halign(Gtk.Align.END)
                 # Larghezza fissa + testo right-anchored: niente reflow quando
                 # il numero di cifre cambia (es. 9.99 → 10.0 → 12.3k).
-                vl.set_width_chars(7); vl.set_max_width_chars(7); vl.set_xalign(1.0)
+                vl.set_width_chars(8); vl.set_max_width_chars(8); vl.set_xalign(1.0)
                 vl.set_markup('<span font_family="monospace" foreground="#f1f5f9" font_weight="bold" size="small">—</span>')
                 g.attach(vl, 1, i + 1, 1, 1)
                 value_labels[key] = vl
@@ -1758,7 +1758,7 @@ def run():
             nl.set_markup(f'<span font_family="monospace" foreground="{color}" size="small">{name}</span>')
             mod_grid.attach(nl, 0, i, 1, 1)
             vl = Gtk.Label(); vl.set_halign(Gtk.Align.END)
-            vl.set_width_chars(7); vl.set_max_width_chars(7); vl.set_xalign(1.0)
+            vl.set_width_chars(8); vl.set_max_width_chars(8); vl.set_xalign(1.0)
             vl.set_markup('<span font_family="monospace" foreground="#f1f5f9" font_weight="bold" size="small">—</span>')
             mod_grid.attach(vl, 1, i, 1, 1)
             ul = Gtk.Label(); ul.set_halign(Gtk.Align.START)
@@ -1851,10 +1851,17 @@ def run():
         INT_NAMES = {INT_EULER: "Eulero", INT_RK4: "RK4", INT_RK45: "RK45"}
 
         def fmt(v):
-            if abs(v) >= 1e6: return f"{v/1e6:.2f}M"
-            if abs(v) >= 1e3: return f"{v/1e3:.2f}k"
-            if abs(v) >= 1: return f"{v:.2f}"
-            return f"{v:.3f}"
+            # Niente suffissi k/M: l'unità è già nella colonna u.m. Mostrare
+            # "3.45k" insieme a "kW" si legge ambiguamente come "-3.45 kW"
+            # quando in realtà è -3.45 MW. Mostra il numero per intero.
+            av = abs(v)
+            if av >= 10000:  return f"{v:.0f}"     # es: 12345
+            if av >= 1000:   return f"{v:.1f}"     # es: 1234.5
+            if av >= 100:    return f"{v:.2f}"     # es: 123.45
+            if av >= 10:     return f"{v:.2f}"     # es:  12.34
+            if av >= 1:      return f"{v:.3f}"     # es:   1.234
+            if av >= 0.01:   return f"{v:.3f}"     # es:   0.012
+            return f"{v:.4f}"                       # es:   0.0001
 
         # Counter per throttling delle label (le scritte non hanno bisogno di girare a 120 Hz)
         gui_counter = {"n": 0}
