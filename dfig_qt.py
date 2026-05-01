@@ -1281,12 +1281,15 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._vc_box = QtWidgets.QWidget()
         vc_v = QtWidgets.QVBoxLayout(self._vc_box)
         vc_v.setContentsMargins(0, 0, 0, 0); vc_v.setSpacing(2)
-        wm_sync_giri = self._fs_value / self._np_value
-        self._sl_vc_wmref = Slider("ω̃_m [giri/s]", wm_sync_giri, 0, 30, 0.1,
-                                   lambda x: self.engine.set_ctrl(wm_ref=x * 2*math.pi),
+        # ω̃_m as a percentage of synchronous speed: 100 % = sync, ±50 % range.
+        # The slider holds an offset-from-sync expressed in %; the callback
+        # multiplies by the current ω_sync (which depends on f_s and n_p) to
+        # get the absolute reference in rad/s mech.
+        self._sl_vc_wmref = Slider("ω̃_m [% sync]", 100.0, 50.0, 150.0, 0.5,
+                                   self._apply_wmref_pct,
                                    compact=True,
-                                   snap_value=wm_sync_giri,
-                                   snap_tolerance=self._snap_tol_giri)
+                                   snap_value=100.0,
+                                   snap_tolerance=1.5)
         vc_v.addWidget(self._sl_vc_wmref)
 
         self._vc_pf_lbl = QtWidgets.QLabel()
@@ -1965,8 +1968,8 @@ class DfigWindow(QtWidgets.QMainWindow):
         # slider via setValue, which fires the slider's callback → engine.set_ctrl,
         # so the UI stays visually in sync with what the engine sees.
         if "wm_factor" in cur:
-            sync_giri = self._fs_value / max(self._np_value, 1e-9)
-            self._sl_vc_wmref.setValue(cur["wm_factor"] * sync_giri)
+            # wm_factor=1.0 means sync; the slider expresses pct (100 % = sync).
+            self._sl_vc_wmref.setValue(cur["wm_factor"] * 100.0)
         if "tan_phi" in cur:
             self._sl_vc_tanphi.setValue(cur["tan_phi"])
         if "tan_phi_ramp" in cur:
@@ -2084,16 +2087,28 @@ class DfigWindow(QtWidgets.QMainWindow):
         sep = htm("  ·  ", color="#475569", size="x-small")
         self._pu_lbl.setText(sep.join(parts))
 
-    # ---- Synchronous-speed snap update ----
+    # ---- Synchronous-speed handling ----
+    def _apply_wmref_pct(self, pct):
+        """Slider callback for ω̃_m. Receives a percentage (50–150 %) of
+        synchronous speed and writes the absolute reference in rad/s mech
+        to the engine. ω_sync depends on the current f_s and n_p, so the
+        same percentage yields a different rad/s after a preset / f_s / n_p
+        change — that's the whole point of expressing it as a fraction."""
+        sync_rad = 2.0 * math.pi * self._fs_value / max(self._np_value, 1e-9)
+        wm_ref_rad = (pct / 100.0) * sync_rad
+        self.engine.set_ctrl(wm_ref=wm_ref_rad)
+
     def _update_sync_snap(self):
-        """Recompute the synchronous-speed snap point on the VC ω̃_m slider
-        whenever f_s or n_p change. ω_sync_giri = f_s / n_p."""
+        """Called when f_s or n_p change. The slider snap point is fixed
+        at 100 % (sync) regardless of preset, so nothing to update there;
+        but the absolute wm_ref [rad/s] needs to be re-applied because
+        sync just moved. Re-firing the slider callback with the current
+        percentage takes care of it."""
         if not hasattr(self, "_sl_vc_wmref"):
-            return  # called during _build_ui before the slider exists
+            return
         if self._np_value <= 0:
             return
-        sync = self._fs_value / self._np_value
-        self._sl_vc_wmref.setSnap(sync, self._snap_tol_giri)
+        self._apply_wmref_pct(self._sl_vc_wmref.value())
 
     # ---- Load: C_load = throttle × factor × T_n ----
     def _on_load_fs_change(self, v):
@@ -2277,7 +2292,7 @@ class DfigWindow(QtWidgets.QMainWindow):
             self._drive_axis("ly", ly, self._sl_dpc_qsref, lambda v: v * 1000.0)
         else:
             self._drive_axis("lx", lx, self._sl_vc_wmref,
-                             lambda v: self._bipolar_to_range(v, 0.0, 30.0))
+                             lambda v: self._bipolar_to_range(v, 50.0, 150.0))
             self._drive_axis("ly", ly, self._sl_vc_tanphi, lambda v: v * 1.0)
 
         # ---- RStick X → speed_factor (log10, -2 → +2 = 0.01× → 100×) ----
