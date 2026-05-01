@@ -1174,14 +1174,21 @@ class DfigWindow(QtWidgets.QMainWindow):
 
         # CARICO — throttle model:
         #   C_load = sign(motor/gen) × throttle × fondoscala
-        # Mouse controls fondoscala + mode button. Gamepad RT drives throttle.
-        # Build children first, then bind the slider's real callback (the
-        # callback dereferences widgets created right after this line).
+        # Mouse: fondoscala + mode button + throttle slider.
+        # Gamepad RT: throttle (sincronizzato con lo slider).
+        # Build children first, then bind the real callbacks (they dereference
+        # widgets created right after).
         self._sl_load_fs = Slider("fondoscala [Nm]", self._load_full_scale,
                                   0, 15000, 100, lambda x: None, compact=True)
         self._load_mode_btn = QtWidgets.QPushButton()
         self._load_mode_btn.setMinimumHeight(26)
         self._load_mode_btn.clicked.connect(self._on_load_mode_click)
+
+        # Throttle slider: 0..100 %, mouse-controlled. Sincronizzato col
+        # gamepad RT (l'aggiornamento da gamepad blocca i signal per evitare
+        # loop di feedback con _on_throttle_slider).
+        self._sl_throttle = Slider("throttle [%]", 0.0,
+                                   0.0, 100.0, 1.0, lambda x: None, compact=True)
 
         self._fill_bar = QtWidgets.QProgressBar()
         self._fill_bar.setRange(0, 100)
@@ -1193,14 +1200,16 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._load_value_lbl = QtWidgets.QLabel()
         self._load_value_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
 
-        # Now wire the real callback and paint initial state.
+        # Now wire the real callbacks and paint initial state.
         self._sl_load_fs.setCallback(self._on_load_fs_change)
+        self._sl_throttle.setCallback(self._on_throttle_slider)
         self._update_load_mode_btn()
         self._update_load()
 
         cbox.addWidget(panel("CARICO", "#22c55e", [
             self._sl_load_fs,
             self._load_mode_btn,
+            self._sl_throttle,
             self._fill_bar,
             self._load_value_lbl,
         ]))
@@ -1898,6 +1907,11 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._update_load_mode_btn()
         self._update_load()
 
+    def _on_throttle_slider(self, v):
+        """Mouse-driven throttle in [0, 100]. Map to 0..1 e applica."""
+        self._throttle = v / 100.0
+        self._update_load()
+
     def _update_load_mode_btn(self):
         """Styled mode toggle: yellow (motor, resistive load) vs green
         (generator, shaft drives the machine). Also retints the fill bar."""
@@ -2036,10 +2050,15 @@ class DfigWindow(QtWidgets.QMainWindow):
         # ---- RT → throttle (0..1 of fondoscala). LT free for now.
         # RT is treated as a non-latching pedal: releasing it returns
         # throttle to 0 → C_load = 0. Throttle change threshold 0.005 to
-        # avoid 30 Hz no-op churn on the engine lock.
+        # avoid 30 Hz no-op churn on the engine lock. Lo slider mouse
+        # viene aggiornato programmaticamente con blockSignals per evitare
+        # un loop di feedback con _on_throttle_slider.
         rt = a.get("rt", 0.0)
         if abs(rt - self._throttle) > 0.005:
             self._throttle = rt
+            self._sl_throttle._sl.blockSignals(True)
+            self._sl_throttle.setValue(rt * 100.0)
+            self._sl_throttle._sl.blockSignals(False)
             self._update_load()
 
         # ---- LStick → context-aware (open / DPC / VC), trim+perturbation:
