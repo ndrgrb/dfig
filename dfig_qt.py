@@ -970,8 +970,8 @@ class DfigWindow(QtWidgets.QMainWindow):
         # when a stick exits the deadzone we capture the slider's current
         # value as the home; while engaged the stick drives the slider
         # absolutely; when the stick re-enters the deadzone we restore home.
-        self._stick_engaged = {"lx": False, "ly": False, "rx": False}
-        self._stick_home    = {"lx": 0.0,   "ly": 0.0,   "rx": 0.0}
+        self._stick_engaged = {"lx": False, "ly": False, "rx": False, "rt": False}
+        self._stick_home    = {"lx": 0.0,   "ly": 0.0,   "rx": 0.0,   "rt": 0.0}
 
         self._build_ui()
 
@@ -1184,18 +1184,12 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._load_mode_btn.setMinimumHeight(26)
         self._load_mode_btn.clicked.connect(self._on_load_mode_click)
 
-        # Throttle slider: 0..100 %, mouse-controlled. Sincronizzato col
-        # gamepad RT (l'aggiornamento da gamepad blocca i signal per evitare
-        # loop di feedback con _on_throttle_slider).
+        # Throttle slider: 0..100 %, mouse-controlled. Stesso pattern di
+        # ω̃_m (trim+perturbation): il gamepad RT muove lo slider mentre è
+        # premuto, al rilascio lo slider torna al valore "home" dov'era
+        # prima dell'engagement.
         self._sl_throttle = Slider("throttle [%]", 0.0,
                                    0.0, 100.0, 1.0, lambda x: None, compact=True)
-
-        self._fill_bar = QtWidgets.QProgressBar()
-        self._fill_bar.setRange(0, 100)
-        self._fill_bar.setValue(0)
-        self._fill_bar.setTextVisible(True)
-        self._fill_bar.setFormat("%p %")
-        self._fill_bar.setFixedHeight(18)
 
         self._load_value_lbl = QtWidgets.QLabel()
         self._load_value_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
@@ -1210,7 +1204,6 @@ class DfigWindow(QtWidgets.QMainWindow):
             self._sl_load_fs,
             self._load_mode_btn,
             self._sl_throttle,
-            self._fill_bar,
             self._load_value_lbl,
         ]))
 
@@ -1914,32 +1907,24 @@ class DfigWindow(QtWidgets.QMainWindow):
 
     def _update_load_mode_btn(self):
         """Styled mode toggle: yellow (motor, resistive load) vs green
-        (generator, shaft drives the machine). Also retints the fill bar."""
+        (generator, shaft drives the machine)."""
         if self._motor_mode:
             self._load_mode_btn.setText("⚙ MOTORE  (carico resistente, Cl > 0)")
             self._load_mode_btn.setStyleSheet(
                 "QPushButton { background-color: #422006; color: #eab308; "
                 "border: 1px solid #eab308; font-family: monospace; font-weight: bold; }")
-            chunk = "#eab308"
         else:
             self._load_mode_btn.setText("🔋 GENERATORE  (albero spinge, Cl < 0)")
             self._load_mode_btn.setStyleSheet(
                 "QPushButton { background-color: #052e16; color: #22c55e; "
                 "border: 1px solid #22c55e; font-family: monospace; font-weight: bold; }")
-            chunk = "#22c55e"
-        self._fill_bar.setStyleSheet(
-            "QProgressBar { background-color: #0f1420; border: 1px solid #2a3040; "
-            "border-radius: 2px; text-align: center; color: #e2e8f0; "
-            "font-family: monospace; font-size: 9pt; } "
-            f"QProgressBar::chunk {{ background-color: {chunk}; }}")
 
     def _update_load(self):
-        """Push the resulting C_load to the engine and refresh the fill bar."""
+        """Push the resulting C_load to the engine and refresh the readout."""
         sign = +1.0 if self._motor_mode else -1.0
         cl = sign * self._throttle * self._load_full_scale
         self.engine.set_ctrl(Cl=cl)
         pct = int(round(self._throttle * 100))
-        self._fill_bar.setValue(pct)
         color = "#eab308" if self._motor_mode else "#22c55e"
         self._load_value_lbl.setText(htm(
             f"throttle {pct}%  →  {cl:+.0f} Nm", color=color, bold=True))
@@ -2047,19 +2032,13 @@ class DfigWindow(QtWidgets.QMainWindow):
         if a.get("D_LEFT"):
             self._sl_vs.setValue(self._sl_vs.value() - 10)
 
-        # ---- RT → throttle (0..1 of fondoscala). LT free for now.
-        # RT is treated as a non-latching pedal: releasing it returns
-        # throttle to 0 → C_load = 0. Throttle change threshold 0.005 to
-        # avoid 30 Hz no-op churn on the engine lock. Lo slider mouse
-        # viene aggiornato programmaticamente con blockSignals per evitare
-        # un loop di feedback con _on_throttle_slider.
-        rt = a.get("rt", 0.0)
-        if abs(rt - self._throttle) > 0.005:
-            self._throttle = rt
-            self._sl_throttle._sl.blockSignals(True)
-            self._sl_throttle.setValue(rt * 100.0)
-            self._sl_throttle._sl.blockSignals(False)
-            self._update_load()
+        # ---- RT → slider throttle (trim+perturbation, come ω̃_m via L-stick).
+        # Mentre RT è premuto lo slider va a rt*100; al rilascio torna al
+        # valore "home" dov'era prima dell'engagement. Il valore di
+        # self._throttle viene aggiornato dal callback dello slider stesso
+        # (_on_throttle_slider), così mouse e gamepad condividono il path.
+        self._drive_axis("rt", a.get("rt", 0.0), self._sl_throttle,
+                         lambda v: v * 100.0)
 
         # ---- LStick → context-aware (open / DPC / VC), trim+perturbation:
         # the slider value at the moment of stick engagement is captured as
