@@ -196,7 +196,7 @@ def _set_pen(p, color, width=1.0, dash=None):
     p.setPen(pen)
 
 
-def draw_dq(p, w, h, snap, traces, t_win, title):
+def draw_dq(p, w, h, snap, traces, t_win, title, axis_labels=("d", "q")):
     p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
     p.fillRect(0, 0, w, h, _color(0.027, 0.047, 0.086))
     S = min(w, h)
@@ -264,8 +264,8 @@ def draw_dq(p, w, h, snap, traces, t_win, title):
     # d / q axis labels
     p.setFont(_font(12, bold=True))
     _set_pen(p, _color(0.55, 0.62, 0.72))
-    p.drawText(QtCore.QPointF(S - 14, S / 2 - 6), "d")
-    p.drawText(QtCore.QPointF(S / 2 + 6, 16), "q")
+    p.drawText(QtCore.QPointF(S - 14, S / 2 - 6), axis_labels[0])
+    p.drawText(QtCore.QPointF(S / 2 + 6, 16), axis_labels[1])
 
     for fd, fq, r, g, b, label in traces:
         dd_full = getattr(snap, fd); qq_full = getattr(snap, fq)
@@ -589,6 +589,145 @@ def draw_tplot(p, w, h, snap, signal_keys, t_win, title,
             else:
                 _set_pen(p, _color(meta["r"], meta["g"], meta["b"]))
             p.drawText(QtCore.QPointF(tip_x + 7, tip_y + line_h * (li + 1)), line)
+
+
+def draw_saturation(p, w, h, state, params, title="SATURAZIONE  L_m / L_m0  vs  |ψ_s|"):
+    """Saturation curve f(|ψ_s|) = L_m,eff / L_m0 plus the current operating
+    point. The kernel formula is f = 1/(1+(σ−1)²) for σ = |ψ_s|/ψ_s,sat ≥ 1,
+    f = 1 below the knee. In OFF mode the operating marker stays on Y=1
+    (model is linear) but the curve is still drawn — visually shows where
+    you would be if saturation were enabled."""
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+    p.fillRect(0, 0, w, h, _color(0.027, 0.047, 0.086))
+
+    # Plot area
+    M_L, M_R, M_T, M_B = 56, 12, 28, 22
+    plot_w = max(1, w - M_L - M_R)
+    plot_h = max(1, h - M_T - M_B)
+
+    # Title
+    p.setFont(_font(13, bold=True))
+    _set_pen(p, _color(0.62, 0.70, 0.80))
+    p.drawText(QtCore.QPointF(8, 18), title)
+
+    # Empty / unset state guard
+    if state is None or params is None or len(params) < 10:
+        p.setFont(_font(11))
+        _set_pen(p, _color(0.30, 0.35, 0.42))
+        msg = "premi RUN"
+        fm = QtGui.QFontMetricsF(p.font())
+        mw = fm.horizontalAdvance(msg)
+        p.drawText(QtCore.QPointF((w - mw) / 2, h / 2), msg)
+        return
+
+    psi_s_sat = float(params[9])
+    sat_en = float(params[8]) > 0.5
+    if psi_s_sat <= 0:
+        psi_s_sat = 1.0  # avoid div-by-zero, fallback
+
+    # X axis: 0 to 2.5 × ψ_s,sat
+    x_max = 2.5 * psi_s_sat
+
+    psi_sd = float(state[0]); psi_sq = float(state[1])
+    psi_s_mag = math.hypot(psi_sd, psi_sq)
+    if sat_en and psi_s_mag > psi_s_sat:
+        sigma = psi_s_mag / psi_s_sat
+        excess = sigma - 1.0
+        op_y = 1.0 / (1.0 + excess * excess)
+    else:
+        op_y = 1.0  # OFF mode → linear, point on Y=1
+    op_x = psi_s_mag
+
+    def xof(psi):
+        return M_L + (psi / x_max) * plot_w
+    def yof(f):
+        return M_T + plot_h - f * plot_h
+
+    # Grid (horizontal at Y = 0, .25, .5, .75, 1)
+    _set_pen(p, _color(0.10, 0.14, 0.20), 0.5)
+    for f in (0.0, 0.25, 0.5, 0.75, 1.0):
+        y = yof(f)
+        p.drawLine(QtCore.QLineF(M_L, y, M_L + plot_w, y))
+    # Vertical grid at X = 0.5, 1.0, 1.5, 2.0 × ψ_s,sat
+    for x_ratio in (0.5, 1.0, 1.5, 2.0):
+        x = xof(x_ratio * psi_s_sat)
+        p.drawLine(QtCore.QLineF(x, M_T, x, M_T + plot_h))
+
+    # Frame
+    _set_pen(p, _color(0.18, 0.22, 0.30), 1.0)
+    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    p.drawRect(QtCore.QRectF(M_L, M_T, plot_w, plot_h))
+
+    # Threshold line at ψ_s,sat (vertical, dashed orange)
+    x_thr = xof(psi_s_sat)
+    _set_pen(p, _color(0.97, 0.45, 0.09, 0.6), 1.2, dash=[5, 4])
+    p.drawLine(QtCore.QLineF(x_thr, M_T, x_thr, M_T + plot_h))
+
+    # Saturation curve — orange, smooth
+    _set_pen(p, _color(0.97, 0.45, 0.09), 1.8)
+    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    path = QtGui.QPainterPath()
+    N = 120
+    for i in range(N + 1):
+        psi = (i / N) * x_max
+        sigma = psi / psi_s_sat
+        excess = sigma - 1.0
+        f = 1.0 / (1.0 + excess * excess) if excess > 0 else 1.0
+        xs = xof(psi); ys = yof(f)
+        if i == 0:
+            path.moveTo(xs, ys)
+        else:
+            path.lineTo(xs, ys)
+    p.drawPath(path)
+
+    # Operating point — white fill, orange border
+    p.setBrush(QtGui.QBrush(_color(0.95, 0.95, 1.0)))
+    _set_pen(p, _color(0.97, 0.45, 0.09), 2.0)
+    op_x_clamped = min(op_x, x_max)
+    p.drawEllipse(QtCore.QPointF(xof(op_x_clamped), yof(op_y)), 5, 5)
+    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+
+    # Y-axis tick labels
+    p.setFont(_font(11))
+    fm = QtGui.QFontMetricsF(p.font())
+    _set_pen(p, _color(0.55, 0.62, 0.72))
+    for f_val in (0.0, 0.5, 1.0):
+        y = yof(f_val)
+        label = f"{f_val:.1f}"
+        lw = fm.horizontalAdvance(label)
+        p.drawText(QtCore.QPointF(M_L - lw - 4, y + 4), label)
+    # Y axis title (vertical-ish — keep horizontal in upper-left margin)
+    p.setFont(_font(10))
+    p.drawText(QtCore.QPointF(8, M_T - 4), "L_m / L_m0")
+
+    # X-axis tick labels (in Wb)
+    p.setFont(_font(11))
+    fm = QtGui.QFontMetricsF(p.font())
+    for x_ratio in (0.0, 0.5, 1.0, 1.5, 2.0):
+        x_val = x_ratio * psi_s_sat
+        if x_val > x_max:
+            continue
+        x = xof(x_val)
+        if abs(x_ratio - 1.0) < 1e-6:
+            label = f"ψ_sat={psi_s_sat:.2f}"
+        else:
+            label = f"{x_val:.2f}"
+        lw = fm.horizontalAdvance(label)
+        p.drawText(QtCore.QPointF(x - lw / 2, h - 6), label)
+
+    # Top-right legend with current state
+    p.setFont(_font(11))
+    fm = QtGui.QFontMetricsF(p.font())
+    mode_lbl = "ON  (modello)" if sat_en else "OFF (warning)"
+    line1 = f"saturazione: {mode_lbl}"
+    line2 = f"|ψ_s| = {psi_s_mag:.3f} Wb · L_m/L_m0 = {op_y:.3f}"
+    lw1 = fm.horizontalAdvance(line1)
+    lw2 = fm.horizontalAdvance(line2)
+    legend_x = w - max(lw1, lw2) - 12
+    _set_pen(p, _color(0.97, 0.45, 0.09))
+    p.drawText(QtCore.QPointF(legend_x, 16), line1)
+    _set_pen(p, _color(0.85, 0.88, 0.95))
+    p.drawText(QtCore.QPointF(legend_x, 30), line2)
 
 
 # ============================================================
@@ -1280,11 +1419,30 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._da_flux.setMinimumSize(220, 220)
         self._da_flux.setDrawFunc(self._make_dq_drawer(traces_flux, "FLUSSI (d,q) [mWb]"))
 
+        # P-Q plane plot — same dq drawer reused with axis labels swapped
+        # (P on x, Q on y) and gen-convention power values from snap.
+        traces_pq = [
+            ("Ps", "Qs", 0.23, 0.51, 0.96, "S̄_s (statore)"),
+            ("Pr", "Qr", 0.94, 0.27, 0.27, "S̄_r (rotore)"),
+        ]
+        self._da_pq = PlotGL()
+        self._da_pq.setMinimumSize(200, 180)
+        self._da_pq.setDrawFunc(self._make_pq_drawer(
+            traces_pq, "POTENZE (P,Q) [kW, kVAR]"))
+
+        # Saturation curve plot — uses state + params (not snap), so it has
+        # its own drawer factory that reads the latest snapshot from self.
+        self._da_sat = PlotGL()
+        self._da_sat.setMinimumSize(200, 180)
+        self._da_sat.setDrawFunc(self._make_sat_drawer())
+
         center_split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         center_split.setChildrenCollapsible(False)
         center_split.addWidget(self._da_curr)
         center_split.addWidget(self._da_flux)
-        center_split.setSizes([100, 100])  # equal halves at startup
+        center_split.addWidget(self._da_pq)
+        center_split.addWidget(self._da_sat)
+        center_split.setSizes([100, 100, 100, 100])  # equal quarters at startup
 
         # Right column — N t-plots, equal height
         self._plot_drawing_areas = []
@@ -1614,6 +1772,20 @@ class DfigWindow(QtWidgets.QMainWindow):
     def _make_dq_drawer(self, traces, title):
         def draw(painter, w, h):
             draw_dq(painter, w, h, self._render_snap, traces, self._twin, title)
+        return draw
+
+    def _make_pq_drawer(self, traces, title):
+        """Reuse draw_dq with P/Q axis labels — same scia + leading-vector
+        rendering, only the data fields and labels change."""
+        def draw(painter, w, h):
+            draw_dq(painter, w, h, self._render_snap, traces, self._twin,
+                    title, axis_labels=("P", "Q"))
+        return draw
+
+    def _make_sat_drawer(self):
+        def draw(painter, w, h):
+            draw_saturation(painter, w, h,
+                            self._render_state, self._render_params)
         return draw
 
     def _make_tplot_drawer(self, j):
