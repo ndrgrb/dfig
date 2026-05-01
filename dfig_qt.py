@@ -630,12 +630,15 @@ def draw_saturation(p, w, h, state, params, title="SATURAZIONE"):
 
     psi_sd = float(state[0]); psi_sq = float(state[1])
     psi_s_mag = math.hypot(psi_sd, psi_sq)
-    if sat_en and psi_s_mag > psi_s_sat:
-        sigma = psi_s_mag / psi_s_sat
+    sigma = psi_s_mag / psi_s_sat
+    in_saturation = (sigma > 1.0)
+    if sat_en and in_saturation:
         excess = sigma - 1.0
         op_y = 1.0 / (1.0 + excess * excess)
     else:
-        op_y = 1.0  # OFF mode → linear, point on Y=1
+        # OFF mode → linear, point always on Y=1.
+        # ON mode + below threshold → still linear, also Y=1.
+        op_y = 1.0
     op_x = psi_s_mag
 
     def xof(psi):
@@ -680,9 +683,12 @@ def draw_saturation(p, w, h, state, params, title="SATURAZIONE"):
             path.lineTo(xs, ys)
     p.drawPath(path)
 
-    # Operating point — white fill, orange border
+    # Operating point — fill always white, border colored by region:
+    #   below threshold → gray (linear region, "safe")
+    #   above threshold → orange (saturating territory)
+    border = _color(0.97, 0.45, 0.09) if in_saturation else _color(0.55, 0.62, 0.72)
     p.setBrush(QtGui.QBrush(_color(0.95, 0.95, 1.0)))
-    _set_pen(p, _color(0.97, 0.45, 0.09), 2.0)
+    _set_pen(p, border, 2.0)
     op_x_clamped = min(op_x, x_max)
     p.drawEllipse(QtCore.QPointF(xof(op_x_clamped), yof(op_y)), 5, 5)
     p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
@@ -722,13 +728,17 @@ def draw_saturation(p, w, h, state, params, title="SATURAZIONE"):
     _set_pen(p, _color(0.45, 0.52, 0.62))
     p.drawText(QtCore.QPointF(M_L + plot_w - 56, M_T + plot_h + 14), "|ψ_s| [Wb]")
 
-    # Top-right legend — compact, single line
+    # Top-right legend — compact, single line, with region indicator
     p.setFont(_font(11))
     fm = QtGui.QFontMetricsF(p.font())
     mode_lbl = "ON" if sat_en else "OFF"
-    line = f"{mode_lbl}  ·  |ψ_s|={psi_s_mag:.2f}  ·  L_m/L_m0={op_y:.3f}"
+    region_lbl = "saturazione" if in_saturation else "lineare"
+    line = (f"{mode_lbl}  ·  σ={sigma:.2f} ({region_lbl})  ·  "
+            f"L_m/L_m0={op_y:.3f}")
     lw = fm.horizontalAdvance(line)
-    _set_pen(p, _color(0.85, 0.88, 0.95))
+    legend_color = (_color(0.97, 0.45, 0.09) if in_saturation
+                    else _color(0.85, 0.88, 0.95))
+    _set_pen(p, legend_color)
     p.drawText(QtCore.QPointF(w - lw - 8, 18), line)
 
 
