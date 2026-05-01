@@ -591,7 +591,7 @@ def draw_tplot(p, w, h, snap, signal_keys, t_win, title,
             p.drawText(QtCore.QPointF(tip_x + 7, tip_y + line_h * (li + 1)), line)
 
 
-def draw_saturation(p, w, h, state, params, title="SATURAZIONE  L_m / L_m0  vs  |ψ_s|"):
+def draw_saturation(p, w, h, state, params, title="SATURAZIONE"):
     """Saturation curve f(|ψ_s|) = L_m,eff / L_m0 plus the current operating
     point. The kernel formula is f = 1/(1+(σ−1)²) for σ = |ψ_s|/ψ_s,sat ≥ 1,
     f = 1 below the knee. In OFF mode the operating marker stays on Y=1
@@ -687,7 +687,7 @@ def draw_saturation(p, w, h, state, params, title="SATURAZIONE  L_m / L_m0  vs  
     p.drawEllipse(QtCore.QPointF(xof(op_x_clamped), yof(op_y)), 5, 5)
     p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
 
-    # Y-axis tick labels
+    # Y-axis tick labels (left of plot area, only 0/0.5/1)
     p.setFont(_font(11))
     fm = QtGui.QFontMetricsF(p.font())
     _set_pen(p, _color(0.55, 0.62, 0.72))
@@ -696,14 +696,17 @@ def draw_saturation(p, w, h, state, params, title="SATURAZIONE  L_m / L_m0  vs  
         label = f"{f_val:.1f}"
         lw = fm.horizontalAdvance(label)
         p.drawText(QtCore.QPointF(M_L - lw - 4, y + 4), label)
-    # Y axis title (vertical-ish — keep horizontal in upper-left margin)
+    # Y axis name — small, rotated under the title (left of plot)
     p.setFont(_font(10))
-    p.drawText(QtCore.QPointF(8, M_T - 4), "L_m / L_m0")
+    _set_pen(p, _color(0.45, 0.52, 0.62))
+    p.drawText(QtCore.QPointF(8, M_T + 12), "L_m/L_m0")
 
-    # X-axis tick labels (in Wb)
+    # X-axis tick labels (in Wb). Skip the 0.0 label (overlaps the y-axis
+    # tick at "0.0"); skip ratios > x_max range.
     p.setFont(_font(11))
     fm = QtGui.QFontMetricsF(p.font())
-    for x_ratio in (0.0, 0.5, 1.0, 1.5, 2.0):
+    _set_pen(p, _color(0.55, 0.62, 0.72))
+    for x_ratio in (0.5, 1.0, 1.5, 2.0):
         x_val = x_ratio * psi_s_sat
         if x_val > x_max:
             continue
@@ -714,20 +717,19 @@ def draw_saturation(p, w, h, state, params, title="SATURAZIONE  L_m / L_m0  vs  
             label = f"{x_val:.2f}"
         lw = fm.horizontalAdvance(label)
         p.drawText(QtCore.QPointF(x - lw / 2, h - 6), label)
+    # X axis name — bottom right
+    p.setFont(_font(10))
+    _set_pen(p, _color(0.45, 0.52, 0.62))
+    p.drawText(QtCore.QPointF(M_L + plot_w - 56, M_T + plot_h + 14), "|ψ_s| [Wb]")
 
-    # Top-right legend with current state
+    # Top-right legend — compact, single line
     p.setFont(_font(11))
     fm = QtGui.QFontMetricsF(p.font())
-    mode_lbl = "ON  (modello)" if sat_en else "OFF (warning)"
-    line1 = f"saturazione: {mode_lbl}"
-    line2 = f"|ψ_s| = {psi_s_mag:.3f} Wb · L_m/L_m0 = {op_y:.3f}"
-    lw1 = fm.horizontalAdvance(line1)
-    lw2 = fm.horizontalAdvance(line2)
-    legend_x = w - max(lw1, lw2) - 12
-    _set_pen(p, _color(0.97, 0.45, 0.09))
-    p.drawText(QtCore.QPointF(legend_x, 16), line1)
+    mode_lbl = "ON" if sat_en else "OFF"
+    line = f"{mode_lbl}  ·  |ψ_s|={psi_s_mag:.2f}  ·  L_m/L_m0={op_y:.3f}"
+    lw = fm.horizontalAdvance(line)
     _set_pen(p, _color(0.85, 0.88, 0.95))
-    p.drawText(QtCore.QPointF(legend_x, 30), line2)
+    p.drawText(QtCore.QPointF(w - lw - 8, 18), line)
 
 
 # ============================================================
@@ -1863,6 +1865,7 @@ class DfigWindow(QtWidgets.QMainWindow):
         for d in self._plot_drawing_areas:
             d.update()
         self._da_curr.update(); self._da_flux.update()
+        self._da_pq.update(); self._da_sat.update()
 
     # ---- Autopilot ----
     def _on_autopilot_toggle(self, checked):
@@ -2283,6 +2286,8 @@ class DfigWindow(QtWidgets.QMainWindow):
 
         # Repaint sibling plots (master will repaint itself)
         self._da_flux.update()
+        self._da_pq.update()
+        self._da_sat.update()
         for d in self._plot_drawing_areas:
             d.update()
 
