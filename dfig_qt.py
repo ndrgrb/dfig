@@ -1438,13 +1438,26 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._da_sat.setMinimumSize(200, 180)
         self._da_sat.setDrawFunc(self._make_sat_drawer())
 
+        # Center column laid out as a 2×2 grid via nested splitters:
+        #   top    row: CORRENTI | POTENZE
+        #   bottom row: FLUSSI   | SATURAZIONE
+        center_top = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        center_top.setChildrenCollapsible(False)
+        center_top.addWidget(self._da_curr)
+        center_top.addWidget(self._da_pq)
+        center_top.setSizes([100, 100])
+
+        center_bot = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        center_bot.setChildrenCollapsible(False)
+        center_bot.addWidget(self._da_flux)
+        center_bot.addWidget(self._da_sat)
+        center_bot.setSizes([100, 100])
+
         center_split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         center_split.setChildrenCollapsible(False)
-        center_split.addWidget(self._da_curr)
-        center_split.addWidget(self._da_flux)
-        center_split.addWidget(self._da_pq)
-        center_split.addWidget(self._da_sat)
-        center_split.setSizes([100, 100, 100, 100])  # equal quarters at startup
+        center_split.addWidget(center_top)
+        center_split.addWidget(center_bot)
+        center_split.setSizes([100, 100])
 
         # Right column — N t-plots, equal height
         self._plot_drawing_areas = []
