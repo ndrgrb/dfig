@@ -731,9 +731,41 @@ def run():
 
         cbox.append(panel("ROTORE", "#ef4444", [mode_box, ol_box, dpc_box, vc_box]))
 
-        cbox.append(panel("CARICO", "#22c55e", [
-            make_slider("C_load [Nm]", 0, -15000, 15000, 100, lambda v: engine.set_ctrl(Cl=v)),
-        ]))
+        # === CARICO ===
+        # Due slider equivalenti che modificano lo stesso C_load:
+        #   - "C_load [Nm]"  (coppia all'asse, range esteso ±50 kNm, step 10)
+        #   - "P_mecc [kW]"  (potenza meccanica @ velocità di sincronismo)
+        # Modifica programmatica di uno aggiorna anche l'altro (senza loop).
+        sync_speed = 2 * math.pi * 50.0 / 3.0   # rad/s mech a fs=50 Hz, n_p=3
+        cl_slider = make_slider("C_load [Nm]", 0, -50000, 50000, 10, lambda v: None)
+        pm_slider = make_slider("P_mecc [kW] @ω_sync", 0, -5000, 5000, 1, lambda v: None)
+        # Recupero gli oggetti Gtk.Scale interni per aggiornare il valore senza
+        # riscatenare il callback (altrimenti loop infinito tra i due slider).
+        cl_scale = cl_slider.get_last_child()
+        pm_scale = pm_slider.get_last_child()
+        cl_handler = [None]; pm_handler = [None]
+
+        def on_cl(scale):
+            v = scale.get_value()
+            engine.set_ctrl(Cl=v)
+            # aggiorno P_mecc senza scatenare il suo callback
+            p_kw = -v * sync_speed / 1e3
+            pm_scale.handler_block(pm_handler[0])
+            pm_scale.set_value(p_kw)
+            pm_scale.handler_unblock(pm_handler[0])
+
+        def on_pm(scale):
+            p_kw = scale.get_value()
+            cl_nm = -p_kw * 1e3 / sync_speed
+            engine.set_ctrl(Cl=cl_nm)
+            cl_scale.handler_block(cl_handler[0])
+            cl_scale.set_value(cl_nm)
+            cl_scale.handler_unblock(cl_handler[0])
+
+        cl_handler[0] = cl_scale.connect("value-changed", on_cl)
+        pm_handler[0] = pm_scale.connect("value-changed", on_pm)
+
+        cbox.append(panel("CARICO", "#22c55e", [cl_slider, pm_slider]))
 
         # --- Pannello SIMULAZIONE: configurazione + speed factor ---
         sim_info = Gtk.Label(); sim_info.set_halign(Gtk.Align.START)
