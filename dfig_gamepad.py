@@ -110,6 +110,10 @@ class GamepadController:
             out["lt"] = max(0.0, (self._js.get_axis(2) + 1.0) / 2.0)
         if n_axes > 5:
             out["rt"] = max(0.0, (self._js.get_axis(5) + 1.0) / 2.0)
+        # Debug: tutti gli assi raw + numero. Permette di mappare trigger
+        # diversi su controller non-standard (es. DualShock, generici HID).
+        out["_naxes"] = n_axes
+        out["_axes_raw"] = tuple(self._js.get_axis(i) for i in range(n_axes))
 
         # Buttons (edge detection: True only on the rising edge).
         for i, name in _XBOX_BTN.items():

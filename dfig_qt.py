@@ -1988,6 +1988,27 @@ class DfigWindow(QtWidgets.QMainWindow):
                 slider.setValue(self._stick_home[name])
                 self._stick_engaged[name] = False
 
+    def _refresh_gamepad_diag(self, rt, lt, n_axes, axes_raw):
+        """Aggiorna la label gamepad con info live (RT/LT + assi raw) quando
+        almeno un trigger o asse è attivo. Aiuta a diagnosticare mapping non
+        standard (controller dove RT non è axis(5))."""
+        if not hasattr(self, "_gp_lbl") or not self._gamepad.available:
+            return
+        cur_id = self._mode_group.checkedId()
+        ctx = {0: "f_r / |V_r|",
+               1: "P_s* / Q_s*",
+               2: "ω_m_ref / tan(φ_s*)"}.get(cur_id, "")
+        # Se qualche asse è "attivo" (oltre il rumore), mostra raw values.
+        any_active = any(abs(v) > 0.05 for v in axes_raw) if axes_raw else False
+        diag = ""
+        if any_active or rt > 0.01 or lt > 0.01:
+            ax = " ".join(f"a{i}={v:+.2f}" for i, v in enumerate(axes_raw))
+            diag = (f"  RT={rt:.2f} LT={lt:.2f}  ({n_axes} axes: {ax})")
+        self._gp_lbl.setText(
+            htm(f"🎮 {self._gamepad.name}  ", color="#22c55e", size="x-small") +
+            htm(f"LStick→{ctx}", color="#94a3b8", size="x-small") +
+            htm(diag, color="#eab308", size="x-small"))
+
     def _gamepad_tick(self):
         # Hot-plug rescan every ~1 s while no controller is attached
         if not self._gamepad.available:
@@ -2037,8 +2058,13 @@ class DfigWindow(QtWidgets.QMainWindow):
         # valore "home" dov'era prima dell'engagement. Il valore di
         # self._throttle viene aggiornato dal callback dello slider stesso
         # (_on_throttle_slider), così mouse e gamepad condividono il path.
-        self._drive_axis("rt", a.get("rt", 0.0), self._sl_throttle,
-                         lambda v: v * 100.0)
+        rt_val = a.get("rt", 0.0)
+        self._drive_axis("rt", rt_val, self._sl_throttle, lambda v: v * 100.0)
+        # Diagnostica live: mostra RT/LT/assi raw nella label gamepad quando
+        # qualcosa è attivo (utile per mapping non-standard).
+        self._refresh_gamepad_diag(
+            rt_val, a.get("lt", 0.0),
+            a.get("_naxes", 0), a.get("_axes_raw", ()))
 
         # ---- LStick → context-aware (open / DPC / VC), trim+perturbation:
         # the slider value at the moment of stick engagement is captured as
