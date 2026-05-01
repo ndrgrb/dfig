@@ -1700,6 +1700,7 @@ class DfigWindow(QtWidgets.QMainWindow):
         # signal-grid checkboxes were checked before connect, so the
         # title-update callback didn't fire).
         self._update_plot_titles()
+        self._refresh_plot_visibility()
 
     def _build_unified_signal_grid(self, groups):
         """Single QGridLayout listing all signals as: ● name | value | u.m. |
@@ -1827,6 +1828,14 @@ class DfigWindow(QtWidgets.QMainWindow):
             self._plot_titles[j] = ((f"Plot {j+1} · " + ", ".join(names))
                                     if names else f"Plot {j+1}")
 
+    def _refresh_plot_visibility(self):
+        """Hide t-plot widgets that have no active signals. The QSplitter
+        redistributes the freed vertical space among the remaining plots."""
+        if not hasattr(self, "_plot_drawing_areas"):
+            return
+        for j, da in enumerate(self._plot_drawing_areas):
+            da.setVisible(bool(self._plot_signals[j]))
+
     # ---- buttons ----
     def _on_run(self):
         running = self.engine.toggle_run()
@@ -1885,6 +1894,8 @@ class DfigWindow(QtWidgets.QMainWindow):
         #    then force a repaint so the new "fresh" state is visible.
         self._y_persist.clear()
         self._cursor_state["x"] = None
+        self._update_plot_titles()
+        self._refresh_plot_visibility()
         for d in self._plot_drawing_areas:
             d.update()
         self._da_curr.update(); self._da_flux.update()
