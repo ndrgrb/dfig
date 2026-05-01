@@ -1782,6 +1782,7 @@ class DfigWindow(QtWidgets.QMainWindow):
                                     self._plot_signals[j].remove(k)
                             self._y_persist.pop(j, None)
                             self._update_plot_titles()
+                            self._refresh_plot_visibility()
                             for d in self._plot_drawing_areas:
                                 d.update()
                         return h
