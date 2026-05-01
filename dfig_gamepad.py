@@ -105,13 +105,25 @@ class GamepadController:
         if n_axes > 4: out["ry"] = self._dz(-self._js.get_axis(4))
 
         # Triggers. SDL2 convention: trigger axes range -1..+1 with rest = -1.
-        # Remap to 0..1.
-        if n_axes > 2:
-            out["lt"] = max(0.0, (self._js.get_axis(2) + 1.0) / 2.0)
-        if n_axes > 5:
-            out["rt"] = max(0.0, (self._js.get_axis(5) + 1.0) / 2.0)
-        # Debug: tutti gli assi raw + numero. Permette di mappare trigger
-        # diversi su controller non-standard (es. DualShock, generici HID).
+        # Remap to 0..1. Il mapping degli assi trigger varia tra OS/driver:
+        #   Windows + Xbox standard:  LT=axis(2), RT=axis(5)
+        #   Linux + Xbox/xpad:        LT=axis(5), RT=axis(4)
+        # Per essere robusti senza per-platform detection, prendiamo il MAX
+        # tra i candidati. Funziona finché l'utente preme un solo trigger
+        # alla volta (caso d'uso abituale per RT come pedale throttle).
+        def _trig(i):
+            return max(0.0, (self._js.get_axis(i) + 1.0) / 2.0)
+        rt_cand = []
+        if n_axes > 4: rt_cand.append(_trig(4))
+        if n_axes > 5: rt_cand.append(_trig(5))
+        out["rt"] = max(rt_cand) if rt_cand else 0.0
+        lt_cand = []
+        if n_axes > 2: lt_cand.append(_trig(2))
+        if n_axes > 4: lt_cand.append(_trig(4))
+        if n_axes > 5: lt_cand.append(_trig(5))
+        # LT = il trigger NON usato come RT (in pratica il secondo più alto)
+        out["lt"] = sorted(lt_cand, reverse=True)[1] if len(lt_cand) >= 2 else 0.0
+        # Debug: tutti gli assi raw + numero (utile per mapping non-standard).
         out["_naxes"] = n_axes
         out["_axes_raw"] = tuple(self._js.get_axis(i) for i in range(n_axes))
 

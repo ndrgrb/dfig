@@ -937,14 +937,18 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._gui_counter = 0
 
         # Load throttle state: C_load = sign × throttle × fondoscala.
-        # Sign comes from motor/generator mode (Y on gamepad, click on the
-        # mode button). Throttle (0..1) is driven by RT on the gamepad.
-        # Default = generator: a DFIG is primarily a generator (wind, hydro);
-        # the simulator uses generator convention everywhere for displayed
-        # quantities (P_s > 0 = delivered to grid, etc.).
+        # Modello carico:
+        #   C_load = throttle × factor × T_n
+        # - factor (signed, ∈ [-2, +2]) è il moltiplicatore di T_nominal
+        #   selezionato dallo slider "fondoscala [×T_n]". Il SEGNO codifica
+        #   la modalità: positivo = motore (carico resistente, Cl>0),
+        #   negativo = generatore (albero spinge, Cl<0). Default -1 (gen 100%).
+        # - throttle ∈ [0, 1] è l'ingresso vivo (slider mouse o RT gamepad).
+        # - T_n è la coppia nominale del preset macchina, aggiornata da
+        #   _on_preset_changed().
         self._throttle = 0.0
-        self._motor_mode = False      # False = generator (shaft drives, Cl < 0)
-        self._load_full_scale = 5000.0
+        self._load_factor = -1.0
+        self._Tn = 1.0   # placeholder, ribasato dal preset al primo load
 
         # Gamepad: optional, polled at 30 Hz from a QTimer. Initialized
         # before _build_ui so the footer label can show its status.
@@ -1172,22 +1176,12 @@ class DfigWindow(QtWidgets.QMainWindow):
         # All sub-boxes exist now so _on_mode_toggled can drive setVisible.
         self._rb_vc.setChecked(True)
 
-        # CARICO — throttle model:
-        #   C_load = sign(motor/gen) × throttle × fondoscala
-        # Mouse: fondoscala + mode button + throttle slider.
-        # Gamepad RT: throttle (sincronizzato con lo slider).
-        # Build children first, then bind the real callbacks (they dereference
-        # widgets created right after).
-        self._sl_load_fs = Slider("fondoscala [Nm]", self._load_full_scale,
-                                  0, 15000, 100, lambda x: None, compact=True)
-        self._load_mode_btn = QtWidgets.QPushButton()
-        self._load_mode_btn.setMinimumHeight(26)
-        self._load_mode_btn.clicked.connect(self._on_load_mode_click)
-
-        # Throttle slider: 0..100 %, mouse-controlled. Stesso pattern di
-        # ω̃_m (trim+perturbation): il gamepad RT muove lo slider mentre è
-        # premuto, al rilascio lo slider torna al valore "home" dov'era
-        # prima dell'engagement.
+        # CARICO — modello: C_load = throttle × factor × T_n
+        # - "fondoscala [×T_n]": signed multiplier in [-2, +2]; il segno
+        #   codifica motore/generatore (no più bottone separato).
+        # - "throttle [%]": ingresso vivo, mouse + RT gamepad (trim+perturbation).
+        self._sl_load_fs = Slider("fondoscala [×T_n]", self._load_factor,
+                                  -2.0, 2.0, 0.05, lambda x: None, compact=True)
         self._sl_throttle = Slider("throttle [%]", 0.0,
                                    0.0, 100.0, 1.0, lambda x: None, compact=True)
 
@@ -1197,12 +1191,10 @@ class DfigWindow(QtWidgets.QMainWindow):
         # Now wire the real callbacks and paint initial state.
         self._sl_load_fs.setCallback(self._on_load_fs_change)
         self._sl_throttle.setCallback(self._on_throttle_slider)
-        self._update_load_mode_btn()
         self._update_load()
 
         cbox.addWidget(panel("CARICO", "#22c55e", [
             self._sl_load_fs,
-            self._load_mode_btn,
             self._sl_throttle,
             self._load_value_lbl,
         ]))
@@ -1673,10 +1665,12 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._tw_slider.setValue(10)
         self._speed_slider.setValue(0.0)  # log10(1) → 1.00× wall
 
-        # 3. Macro state: control mode, load mode, throttle, saturation toggle.
+        # 3. Macro state: control mode, load factor, throttle, saturation toggle.
         self._throttle = 0.0
-        if self._motor_mode:
-            self._on_load_mode_click()  # back to generator (default startup)
+        self._sl_throttle.setValue(0.0)
+        # Default factor = -1.0 (generatore al 100% T_n). Lo slider scrive
+        # _load_factor via _on_load_fs_change quando viene impostato.
+        self._sl_load_fs.setValue(-1.0)
         if not self._rb_vc.isChecked():
             self._rb_vc.setChecked(True)  # back to VC mode
         if self._sat_btn.isChecked():
@@ -1705,10 +1699,15 @@ class DfigWindow(QtWidgets.QMainWindow):
             # Force VC mode (autopilot is wired against VC setpoints only)
             if not self._rb_vc.isChecked():
                 self._rb_vc.setChecked(True)
-            # Apply ensure constraints (e.g. force generator mode for load test)
+            # Apply ensure constraints (e.g. force generator mode for load test).
+            # motor_mode True/False mappa al SEGNO di _load_factor (positivo
+            # motore, negativo generatore); preserva la magnitudine corrente.
             ensure = scenario.get("ensure", {})
-            if "motor_mode" in ensure and ensure["motor_mode"] != self._motor_mode:
-                self._on_load_mode_click()
+            if "motor_mode" in ensure:
+                want_motor = ensure["motor_mode"]
+                cur_is_motor = self._load_factor > 0
+                if want_motor != cur_is_motor:
+                    self._sl_load_fs.setValue(-self._load_factor)
             self._auto_active = True
             self._auto_t0 = time.perf_counter()
             self._auto_btn.setText("■ STOP")
@@ -1809,13 +1808,9 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._sl_vs.setValue(p["Vn"])
         self._sl_fs.setValue(p["fs"])
 
-        # Rescale C_load fondoscala: max ≈ 1.5 × T_n with ~150 step resolution.
-        Tn_max = 1.5 * si["Tn"]
-        step = max(1.0, Tn_max / 150.0)
-        self._sl_load_fs.setRange(0.0, Tn_max, step)
-        # Force re-application of throttle * fondoscala against the (possibly
-        # clamped) fondoscala value.
-        self._load_full_scale = self._sl_load_fs.value()
+        # T_n del preset → ribasa la coppia nominale per il modello carico.
+        # Lo slider "fondoscala" è dimensionless (×T_n), non va riranged.
+        self._Tn = si["Tn"]
         self._update_load()
 
         # Saturation threshold default: 1.2 × ψ_s,nom = 1.2 · V_n / (2π·f_s).
@@ -1890,14 +1885,11 @@ class DfigWindow(QtWidgets.QMainWindow):
         sync = self._fs_value / self._np_value
         self._sl_vc_wmref.setSnap(sync, self._snap_tol_giri)
 
-    # ---- Load throttle ----
+    # ---- Load: C_load = throttle × factor × T_n ----
     def _on_load_fs_change(self, v):
-        self._load_full_scale = v
-        self._update_load()
-
-    def _on_load_mode_click(self):
-        self._motor_mode = not self._motor_mode
-        self._update_load_mode_btn()
+        """Slider fondoscala (signed factor ×T_n): aggiorna factor e ricalcola
+        C_load. Il segno codifica motore/generatore (non c'è più bottone)."""
+        self._load_factor = v
         self._update_load()
 
     def _on_throttle_slider(self, v):
@@ -1905,29 +1897,22 @@ class DfigWindow(QtWidgets.QMainWindow):
         self._throttle = v / 100.0
         self._update_load()
 
-    def _update_load_mode_btn(self):
-        """Styled mode toggle: yellow (motor, resistive load) vs green
-        (generator, shaft drives the machine)."""
-        if self._motor_mode:
-            self._load_mode_btn.setText("⚙ MOTORE  (carico resistente, Cl > 0)")
-            self._load_mode_btn.setStyleSheet(
-                "QPushButton { background-color: #422006; color: #eab308; "
-                "border: 1px solid #eab308; font-family: monospace; font-weight: bold; }")
-        else:
-            self._load_mode_btn.setText("🔋 GENERATORE  (albero spinge, Cl < 0)")
-            self._load_mode_btn.setStyleSheet(
-                "QPushButton { background-color: #052e16; color: #22c55e; "
-                "border: 1px solid #22c55e; font-family: monospace; font-weight: bold; }")
-
     def _update_load(self):
-        """Push the resulting C_load to the engine and refresh the readout."""
-        sign = +1.0 if self._motor_mode else -1.0
-        cl = sign * self._throttle * self._load_full_scale
+        """Push C_load = throttle × factor × T_n to the engine + readout."""
+        cl = self._throttle * self._load_factor * self._Tn
         self.engine.set_ctrl(Cl=cl)
         pct = int(round(self._throttle * 100))
-        color = "#eab308" if self._motor_mode else "#22c55e"
+        # Colore: giallo se motore (factor>0), verde se generatore (<0).
+        color = ("#eab308" if self._load_factor > 0
+                 else "#22c55e" if self._load_factor < 0
+                 else "#94a3b8")
+        mode_lbl = ("MOTORE" if self._load_factor > 0
+                    else "GENERATORE" if self._load_factor < 0
+                    else "—")
         self._load_value_lbl.setText(htm(
-            f"throttle {pct}%  →  {cl:+.0f} Nm", color=color, bold=True))
+            f"{mode_lbl}  ·  {self._load_factor:+.2f}×T_n  ·  "
+            f"throttle {pct}%  →  {cl:+.0f} Nm",
+            color=color, bold=True))
 
     def _on_mode_toggled(self, button_id, checked):
         if not checked:
@@ -2034,7 +2019,8 @@ class DfigWindow(QtWidgets.QMainWindow):
             nxt_id = (cur_id + 1) % 3
             {0: self._rb_open, 1: self._rb_dpc, 2: self._rb_vc}[nxt_id].setChecked(True)
         if a.get("Y"):
-            self._on_load_mode_click()
+            # Flip motore/generatore = inverte il segno del fattore di carico.
+            self._sl_load_fs.setValue(-self._load_factor)
 
         # ---- Shoulders → time window ±1 s (auto-repeat naturale: il button
         # fa edge-detection, quindi ogni nuovo press è un singolo step) ----
