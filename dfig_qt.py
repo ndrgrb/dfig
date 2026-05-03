@@ -1491,22 +1491,10 @@ class DfigWindow(QtWidgets.QMainWindow):
         v.addWidget(main_split, 1)  # take all available vertical space
 
         # ---- Time window slider ----
-        tw_row = QtWidgets.QHBoxLayout(); tw_row.setSpacing(8)
-        tw_lbl = QtWidgets.QLabel()
-        tw_lbl.setText(htm("Finestra:", color="#94a3b8"))
-        tw_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
-        self._tw_val = QtWidgets.QLabel()
-        self._tw_val.setText(htm("10 s", color="#e2e8f0"))
-        self._tw_val.setTextFormat(QtCore.Qt.TextFormat.RichText)
         def set_twin(x):
             self._twin = x
-            self._tw_val.setText(htm(f"{x:.0f} s", color="#e2e8f0"))
-        self._tw_slider = Slider("", 10, 1, 60, 1, set_twin)
-        tw_row.addWidget(tw_lbl)
-        tw_row.addWidget(self._tw_slider, 1)
-        tw_row.addWidget(self._tw_val)
-        # Note: tw_row is appended to cbox at the bottom (with the other
-        # collapsible sections), not to v.
+        self._tw_slider = Slider("Finestra [s]", 10, 1, 60, 1, set_twin,
+                                 compact=True)
 
         # ---- Machine parameters grid (collapsible) ----
         # State: which preset's nominal bases (V_n, S_n, f_s) are used to
@@ -1660,7 +1648,7 @@ class DfigWindow(QtWidgets.QMainWindow):
         cbox.addWidget(autopilot_section)
         cbox.addWidget(param_section)
         cbox.addWidget(composer)
-        cbox.addLayout(tw_row)
+        cbox.addWidget(self._tw_slider)
         cbox.addStretch(1)
 
         # ---- Footer ----
