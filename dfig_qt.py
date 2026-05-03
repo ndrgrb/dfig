@@ -196,7 +196,7 @@ def _set_pen(p, color, width=1.0, dash=None):
     p.setPen(pen)
 
 
-def draw_dq(p, w, h, snap, traces, t_win, title, axis_labels=("d", "q")):
+def draw_dq(p, w, h, snap, traces, t_win, axis_labels=("d", "q")):
     p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
     p.fillRect(0, 0, w, h, _color(0.027, 0.047, 0.086))
     S = min(w, h)
@@ -297,14 +297,8 @@ def draw_dq(p, w, h, snap, traces, t_win, title, axis_labels=("d", "q")):
         _set_pen(p, _color(r, g, b))
         p.drawText(QtCore.QPointF(8, ly), f"● {label}"); ly -= 16
 
-    p.setFont(_font(13, bold=True))
-    _set_pen(p, _color(0.62, 0.70, 0.80))
-    fm = QtGui.QFontMetricsF(p.font())
-    tw = fm.horizontalAdvance(title)
-    p.drawText(QtCore.QPointF((S - tw) / 2, 16), title)
 
-
-def draw_tplot(p, w, h, snap, signal_keys, t_win, title,
+def draw_tplot(p, w, h, snap, signal_keys, t_win,
                plot_idx, y_persist, cursor_state, stacked=False):
     """Time-series plot with hysteretic Y axis, ticks, cross-plot cursor,
     and (optional) stacked/diverging area mode for power balances."""
@@ -317,11 +311,6 @@ def draw_tplot(p, w, h, snap, signal_keys, t_win, title,
 
     # Background
     p.fillRect(0, 0, w, h, _color(0.027, 0.047, 0.086))
-
-    # Title (top-left)
-    p.setFont(_font(13, bold=True))
-    _set_pen(p, _color(0.62, 0.70, 0.80))
-    p.drawText(QtCore.QPointF(8, 18), title)
 
     # Empty state
     if not signal_keys:
@@ -591,7 +580,7 @@ def draw_tplot(p, w, h, snap, signal_keys, t_win, title,
             p.drawText(QtCore.QPointF(tip_x + 7, tip_y + line_h * (li + 1)), line)
 
 
-def draw_saturation(p, w, h, state, params, title="SATURAZIONE"):
+def draw_saturation(p, w, h, state, params):
     """Saturation curve f(|ψ_s|) = L_m,eff / L_m0 plus the current operating
     point. The kernel formula is f = 1/(1+(σ−1)²) for σ = |ψ_s|/ψ_s,sat ≥ 1,
     f = 1 below the knee. In OFF mode the operating marker stays on Y=1
@@ -604,11 +593,6 @@ def draw_saturation(p, w, h, state, params, title="SATURAZIONE"):
     M_L, M_R, M_T, M_B = 56, 12, 28, 22
     plot_w = max(1, w - M_L - M_R)
     plot_h = max(1, h - M_T - M_B)
-
-    # Title
-    p.setFont(_font(13, bold=True))
-    _set_pen(p, _color(0.62, 0.70, 0.80))
-    p.drawText(QtCore.QPointF(8, 18), title)
 
     # Empty / unset state guard
     if state is None or params is None or len(params) < 10:
@@ -702,7 +686,7 @@ def draw_saturation(p, w, h, state, params, title="SATURAZIONE"):
         label = f"{f_val:.1f}"
         lw = fm.horizontalAdvance(label)
         p.drawText(QtCore.QPointF(M_L - lw - 4, y + 4), label)
-    # Y axis name — small, rotated under the title (left of plot)
+    # Y axis name — small label at top-left of the plot
     p.setFont(_font(10))
     _set_pen(p, _color(0.45, 0.52, 0.62))
     p.drawText(QtCore.QPointF(8, M_T + 12), "L_m/L_m0")
@@ -1078,7 +1062,6 @@ class DfigWindow(QtWidgets.QMainWindow):
         # between stator and rotor when the machine is generating).
         self._plot_signals = [["wm"], ["Ps", "Pr"], ["Qs", "Qr"]]
         self._plot_stacked = [False, True, True]
-        self._plot_titles = [f"Plot {j+1}" for j in range(self._plot_count)]
         self._y_persist = {}
         self._cursor_state = {"x": None}
 
@@ -1428,11 +1411,11 @@ class DfigWindow(QtWidgets.QMainWindow):
         # Master plot drives the vsync loop
         self._da_curr = MasterPlotGL()
         self._da_curr.setMinimumSize(220, 220)
-        self._da_curr.setDrawFunc(self._make_dq_drawer(traces_curr, "CORRENTI (d,q) [A]"))
+        self._da_curr.setDrawFunc(self._make_dq_drawer(traces_curr))
         self._da_curr.frame_tick.connect(self._gui_tick)
         self._da_flux = PlotGL()
         self._da_flux.setMinimumSize(220, 220)
-        self._da_flux.setDrawFunc(self._make_dq_drawer(traces_flux, "FLUSSI (d,q) [mWb]"))
+        self._da_flux.setDrawFunc(self._make_dq_drawer(traces_flux))
 
         # P-Q plane plot — same dq drawer reused with axis labels swapped
         # (P on x, Q on y) and gen-convention power values from snap.
@@ -1442,8 +1425,7 @@ class DfigWindow(QtWidgets.QMainWindow):
         ]
         self._da_pq = PlotGL()
         self._da_pq.setMinimumSize(200, 180)
-        self._da_pq.setDrawFunc(self._make_pq_drawer(
-            traces_pq, "POTENZE (P,Q) [kW, kVAR]"))
+        self._da_pq.setDrawFunc(self._make_pq_drawer(traces_pq))
 
         # Saturation curve plot — uses state + params (not snap), so it has
         # its own drawer factory that reads the latest snapshot from self.
@@ -1699,10 +1681,6 @@ class DfigWindow(QtWidgets.QMainWindow):
         v.addLayout(ft_row)
         self._refresh_gamepad_label()
 
-        # Update plot titles to reflect the default _plot_signals (the
-        # signal-grid checkboxes were checked before connect, so the
-        # title-update callback didn't fire).
-        self._update_plot_titles()
         self._refresh_plot_visibility()
 
     def _build_unified_signal_grid(self, groups):
@@ -1784,7 +1762,6 @@ class DfigWindow(QtWidgets.QMainWindow):
                                 if k in self._plot_signals[j]:
                                     self._plot_signals[j].remove(k)
                             self._y_persist.pop(j, None)
-                            self._update_plot_titles()
                             self._refresh_plot_visibility()
                             for d in self._plot_drawing_areas:
                                 d.update()
@@ -1799,17 +1776,17 @@ class DfigWindow(QtWidgets.QMainWindow):
         return g
 
     # ---- draw_func factories ----
-    def _make_dq_drawer(self, traces, title):
+    def _make_dq_drawer(self, traces):
         def draw(painter, w, h):
-            draw_dq(painter, w, h, self._render_snap, traces, self._twin, title)
+            draw_dq(painter, w, h, self._render_snap, traces, self._twin)
         return draw
 
-    def _make_pq_drawer(self, traces, title):
+    def _make_pq_drawer(self, traces):
         """Reuse draw_dq with P/Q axis labels — same scia + leading-vector
         rendering, only the data fields and labels change."""
         def draw(painter, w, h):
             draw_dq(painter, w, h, self._render_snap, traces, self._twin,
-                    title, axis_labels=("P", "Q"))
+                    axis_labels=("P", "Q"))
         return draw
 
     def _make_sat_drawer(self):
@@ -1821,16 +1798,10 @@ class DfigWindow(QtWidgets.QMainWindow):
     def _make_tplot_drawer(self, j):
         def draw(painter, w, h):
             draw_tplot(painter, w, h, self._render_snap,
-                       self._plot_signals[j], self._twin, self._plot_titles[j],
+                       self._plot_signals[j], self._twin,
                        j, self._y_persist, self._cursor_state,
                        stacked=self._plot_stacked[j])
         return draw
-
-    def _update_plot_titles(self):
-        for j in range(self._plot_count):
-            names = [SIG_BY_KEY[k]["name"] for k in self._plot_signals[j] if k in SIG_BY_KEY]
-            self._plot_titles[j] = ((f"Plot {j+1} · " + ", ".join(names))
-                                    if names else f"Plot {j+1}")
 
     def _refresh_plot_visibility(self):
         """Hide t-plot widgets that have no active signals. The QSplitter
@@ -1898,7 +1869,6 @@ class DfigWindow(QtWidgets.QMainWindow):
         #    then force a repaint so the new "fresh" state is visible.
         self._y_persist.clear()
         self._cursor_state["x"] = None
-        self._update_plot_titles()
         self._refresh_plot_visibility()
         for d in self._plot_drawing_areas:
             d.update()
