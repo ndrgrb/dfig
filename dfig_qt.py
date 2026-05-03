@@ -1022,7 +1022,8 @@ INT_NAMES = {INT_EULER: "Eulero", INT_RK4: "RK4", INT_RK45: "RK45"}
 
 SCALAR_KEYS = ["wm", "Ce", "Ps", "Qs", "Pr", "Qr", "PRs", "PRr", "slip",
                "Pmech", "Pem", "Pfric", "Ploss", "dKEdt"]
-DQ_KEYS     = ["isd", "isq", "ird", "irq", "psd", "psq", "prd", "prq"]
+DQ_KEYS     = ["isd", "isq", "ird", "irq", "psd", "psq", "prd", "prq",
+               "vsd", "vsq", "vrd", "vrq"]
 # Magnitudes / derived signals — full citizens of the composer (value display
 # + per-plot checkboxes). They aren't stored in the history buffer; the UI
 # attaches them as numpy views on snap.* in _gui_tick before painting.
@@ -2382,6 +2383,8 @@ class DfigWindow(QtWidgets.QMainWindow):
             "ird":  ird, "irq":  irq,
             "psd":  psd * 1e3, "psq": psq * 1e3,
             "prd":  prd * 1e3, "prq": prq * 1e3,
+            "vsd":  ctrl["Vs"], "vsq": 0.0,
+            "vrd":  vrd, "vrq":  vrq,
             "Pmech": Pmech / 1e3,
             "Pem":   Pem   / 1e3,
             "Pfric": Pfric / 1e3,

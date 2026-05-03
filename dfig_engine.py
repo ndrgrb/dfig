@@ -71,12 +71,18 @@ H_QR, H_PRS, H_PRR = 15, 16, 17
 #   Ploss =  P_Rs + P_Rr + Pfric (total losses, always ≥0)
 #   dKEdt =  J·ωm·(dωm/dt) (kinetic energy derivative — convention-free)
 H_PMECH, H_PEM, H_PFRIC, H_PLOSS, H_DKEDT = 18, 19, 20, 21, 22
-NH = 23
+# Stator/rotor voltages in dq frame [V]. Stator alignment convention:
+# V_sd = |V_s|, V_sq = 0  (the dq frame is locked to the stator voltage
+# vector, see deriv() — Vs appears only in the d equation). Rotor voltages
+# come from whichever controller is active (open-loop sinusoid, DPC, VC).
+H_VSD, H_VSQ, H_VRD, H_VRQ = 23, 24, 25, 26
+NH = 27
 HIST_FIELDS = ["t", "wm", "Ce", "Ps", "Qs", "Pr", "slip",
                "isd", "isq", "ird", "irq",
                "psd", "psq", "prd", "prq",
                "Qr", "PRs", "PRr",
-               "Pmech", "Pem", "Pfric", "Ploss", "dKEdt"]
+               "Pmech", "Pem", "Pfric", "Ploss", "dKEdt",
+               "vsd", "vsq", "vrd", "vrq"]
 
 # Catalogue of plottable signals (hist key · display name · unit · RGB).
 SIGNALS_LIST = [
@@ -97,6 +103,10 @@ SIGNALS_LIST = [
     ("psq",  "φ_sq", "mWb",   0.20, 0.65, 0.40),
     ("prd",  "φ_rd", "mWb",   1.00, 0.50, 0.85),
     ("prq",  "φ_rq", "mWb",   0.85, 0.30, 0.65),
+    ("vsd",  "v_sd", "V",     0.20, 0.85, 0.95),
+    ("vsq",  "v_sq", "V",     0.10, 0.65, 0.75),
+    ("vrd",  "v_rd", "V",     0.95, 0.80, 0.20),
+    ("vrq",  "v_rq", "V",     0.75, 0.60, 0.10),
     # Energy balance
     ("Pmech", "P_mecc",  "kW", 0.30, 0.85, 0.50),
     ("Pem",   "P_em",    "kW", 0.95, 0.60, 0.30),
@@ -513,6 +523,10 @@ def observe(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, out):
     out[20] = Pfric / 1e3
     out[21] = Ploss / 1e3
     out[22] = dKEdt / 1e3
+    out[23] = Vs           # v_sd — by alignment convention V_s lies on d
+    out[24] = 0.0          # v_sq — orthogonal component is zero by construction
+    out[25] = vrd          # v_rd — from active controller (held) or open-loop
+    out[26] = vrq          # v_rq
 
 
 @njit(cache=True, fastmath=True, nogil=True)
