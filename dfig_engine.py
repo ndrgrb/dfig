@@ -76,13 +76,18 @@ H_PMECH, H_PEM, H_PFRIC, H_PLOSS, H_DKEDT = 18, 19, 20, 21, 22
 # vector, see deriv() — Vs appears only in the d equation). Rotor voltages
 # come from whichever controller is active (open-loop sinusoid, DPC, VC).
 H_VSD, H_VSQ, H_VRD, H_VRQ = 23, 24, 25, 26
-NH = 27
+# Rotor phase voltages [V] — back-transform from dq to rotor abc, useful to
+# inspect what the rotor windings physically see (sinusoid at slip in open-
+# loop with f_r = f_slip, bang-bang in DPC, PI-shaped in VC).
+H_VRA, H_VRB, H_VRC = 27, 28, 29
+NH = 30
 HIST_FIELDS = ["t", "wm", "Ce", "Ps", "Qs", "Pr", "slip",
                "isd", "isq", "ird", "irq",
                "psd", "psq", "prd", "prq",
                "Qr", "PRs", "PRr",
                "Pmech", "Pem", "Pfric", "Ploss", "dKEdt",
-               "vsd", "vsq", "vrd", "vrq"]
+               "vsd", "vsq", "vrd", "vrq",
+               "vra", "vrb", "vrc"]
 
 # Catalogue of plottable signals (hist key · display name · unit · RGB).
 SIGNALS_LIST = [
@@ -107,6 +112,9 @@ SIGNALS_LIST = [
     ("vsq",  "v_sq", "V",     0.10, 0.65, 0.75),
     ("vrd",  "v_rd", "V",     0.95, 0.80, 0.20),
     ("vrq",  "v_rq", "V",     0.75, 0.60, 0.10),
+    ("vra",  "v_ra", "V",     0.95, 0.30, 0.30),
+    ("vrb",  "v_rb", "V",     0.30, 0.85, 0.30),
+    ("vrc",  "v_rc", "V",     0.30, 0.55, 0.95),
     # Energy balance
     ("Pmech", "P_mecc",  "kW", 0.30, 0.85, 0.50),
     ("Pem",   "P_em",    "kW", 0.95, 0.60, 0.30),
@@ -527,6 +535,14 @@ def observe(s, Vs, ws, Vr, wr, vrd_h, vrq_h, use_held, Cl, params, out):
     out[24] = 0.0          # v_sq — orthogonal component is zero by construction
     out[25] = vrd          # v_rd — from active controller (held) or open-loop
     out[26] = vrq          # v_rq
+    # Rotor phase voltages — inverse Park to the *rotor* abc frame.
+    # θ_a = ω_s·t − n_p·θ_m  is the angle of the dq frame relative to the
+    # rotor a-axis; same convention used by the open-loop generator above.
+    theta_a = ws * t - NP * thm
+    TWO_PI_3 = 2.0943951023931953  # 2π/3
+    out[27] = vrd * math.cos(theta_a)            - vrq * math.sin(theta_a)
+    out[28] = vrd * math.cos(theta_a - TWO_PI_3) - vrq * math.sin(theta_a - TWO_PI_3)
+    out[29] = vrd * math.cos(theta_a + TWO_PI_3) - vrq * math.sin(theta_a + TWO_PI_3)
 
 
 @njit(cache=True, fastmath=True, nogil=True)

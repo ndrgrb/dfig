@@ -1024,6 +1024,7 @@ SCALAR_KEYS = ["wm", "Ce", "Ps", "Qs", "Pr", "Qr", "PRs", "PRr", "slip",
                "Pmech", "Pem", "Pfric", "Ploss", "dKEdt"]
 DQ_KEYS     = ["isd", "isq", "ird", "irq", "psd", "psq", "prd", "prq",
                "vsd", "vsq", "vrd", "vrq"]
+ABC_KEYS    = ["vra", "vrb", "vrc"]
 # Magnitudes / derived signals — full citizens of the composer (value display
 # + per-plot checkboxes). They aren't stored in the history buffer; the UI
 # attaches them as numpy views on snap.* in _gui_tick before painting.
@@ -1567,6 +1568,7 @@ class DfigWindow(QtWidgets.QMainWindow):
         unified = self._build_unified_signal_grid([
             ("scalari", SCALAR_KEYS),
             ("dq", DQ_KEYS),
+            ("trifasi (rotore)", ABC_KEYS),
             ("moduli / derivati", MOD_KEYS),
         ])
         comp_box.addLayout(unified)
@@ -2385,6 +2387,13 @@ class DfigWindow(QtWidgets.QMainWindow):
             "prd":  prd * 1e3, "prq": prq * 1e3,
             "vsd":  ctrl["Vs"], "vsq": 0.0,
             "vrd":  vrd, "vrq":  vrq,
+            # Rotor phase voltages — same back-transform as the engine.
+            "vra":  vrd*math.cos(ws_now*t_now - NP_p*st[5])
+                   - vrq*math.sin(ws_now*t_now - NP_p*st[5]),
+            "vrb":  vrd*math.cos(ws_now*t_now - NP_p*st[5] - 2*math.pi/3)
+                   - vrq*math.sin(ws_now*t_now - NP_p*st[5] - 2*math.pi/3),
+            "vrc":  vrd*math.cos(ws_now*t_now - NP_p*st[5] + 2*math.pi/3)
+                   - vrq*math.sin(ws_now*t_now - NP_p*st[5] + 2*math.pi/3),
             "Pmech": Pmech / 1e3,
             "Pem":   Pem   / 1e3,
             "Pfric": Pfric / 1e3,
