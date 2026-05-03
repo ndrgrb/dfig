@@ -1401,12 +1401,12 @@ class DfigWindow(QtWidgets.QMainWindow):
 
         # Center column — dq plots stacked
         traces_curr = [
-            ("isd", "isq", 0.23, 0.51, 0.96, "ī_s (statore)"),
-            ("ird", "irq", 0.94, 0.27, 0.27, "ī_r (rotore)"),
+            ("isd", "isq", 0.23, 0.51, 0.96, "ī_s (statore) [A]"),
+            ("ird", "irq", 0.94, 0.27, 0.27, "ī_r (rotore) [A]"),
         ]
         traces_flux = [
-            ("psd", "psq", 0.23, 0.51, 0.96, "φ̄_s (statore)"),
-            ("prd", "prq", 0.94, 0.27, 0.27, "φ̄_r (rotore)"),
+            ("psd", "psq", 0.23, 0.51, 0.96, "φ̄_s (statore) [mWb]"),
+            ("prd", "prq", 0.94, 0.27, 0.27, "φ̄_r (rotore) [mWb]"),
         ]
         # Master plot drives the vsync loop
         self._da_curr = MasterPlotGL()
@@ -1420,8 +1420,8 @@ class DfigWindow(QtWidgets.QMainWindow):
         # P-Q plane plot — same dq drawer reused with axis labels swapped
         # (P on x, Q on y) and gen-convention power values from snap.
         traces_pq = [
-            ("Ps", "Qs", 0.23, 0.51, 0.96, "S̄_s (statore)"),
-            ("Pr", "Qr", 0.94, 0.27, 0.27, "S̄_r (rotore)"),
+            ("Ps", "Qs", 0.23, 0.51, 0.96, "S̄_s (statore) [kW, kVAR]"),
+            ("Pr", "Qr", 0.94, 0.27, 0.27, "S̄_r (rotore) [kW, kVAR]"),
         ]
         self._da_pq = PlotGL()
         self._da_pq.setMinimumSize(200, 180)
